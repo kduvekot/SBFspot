@@ -1,0 +1,192 @@
+name: Phase 1 fingerprint (audit)
+
+# Reproduces the local dissection behind docs/fingerprint.md on a fresh
+# GitHub Actions runner, so external reviewers can cross-check the
+# tables without running anything locally. The workflow:
+#   1. Downloads all 15 V3.9.12 Linux release assets from SBFspot/SBFspot
+#   2. Verifies the known-good sha256 for the Phase 2 MVP target tarball
+#   3. Emits tabulated dissection output matching docs/fingerprint.md:
+#      - gzip header bytes (method, flags, mtime, xfl, os)
+#      - tar member metadata (order, uid/gid, mtime, perms, sha256)
+#      - per-ELF: header, OSABI, class, PIE, build-id, .comment, NEEDED
+#   4. Uploads the full dissection as a workflow artefact
+#
+# Frozen behind .fingerprint-trigger, same pattern as probe.yml — this
+# is a reference audit, not a routine job. Touch and push the trigger
+# file to rerun.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.fingerprint-trigger
+
+jobs:
+  fingerprint:
+    name: Dissect V3.9.12 upstream tarballs
+    runs-on: ubuntu-latest
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+      MVP_NAME: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+      MVP_SHA256: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+    steps:
+      - name: Install inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils file xxd coreutils gzip tar curl jq
+
+      - name: Download all 15 Linux release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          mkdir -p tarballs
+          cd tarballs
+          # Enumerate release assets via the GitHub API and grep the
+          # 15 Linux tarballs (exclude the 2 Windows zips).
+          curl -sSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
+            > release.json
+          jq -r '.assets[] | select(.name | test("^sbfspot-.*-linux-.*\\.tar\\.gz$")) | .browser_download_url' \
+            release.json > urls.txt
+          test "$(wc -l < urls.txt)" -eq 15
+          while read -r url; do
+            curl -sSL -O "$url"
+          done < urls.txt
+          ls -la
+
+      - name: Verify MVP target sha256
+        run: |
+          set -euxo pipefail
+          cd tarballs
+          echo "${MVP_SHA256}  ${MVP_NAME}" | sha256sum -c -
+
+      - name: Record all tarball sha256s
+        run: |
+          set -euo pipefail
+          cd tarballs
+          sha256sum *.tar.gz | sort -k2 | tee ../tarball-sha256.txt
+
+      - name: Dissect gzip headers
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          : > out/gzip-header.txt
+          for f in tarballs/*.tar.gz; do
+            name=$(basename "$f")
+            # gzip header layout (10 bytes):
+            #   [0..1]  magic 1f 8b
+            #   [2]     method (08=deflate)
+            #   [3]     flags
+            #   [4..7]  mtime (little-endian uint32)
+            #   [8]     xfl
+            #   [9]     os
+            hdr=$(xxd -p -l 10 "$f")
+            method=${hdr:4:2}
+            flags=${hdr:6:2}
+            mtime_le=${hdr:8:8}
+            xfl=${hdr:16:2}
+            os=${hdr:18:2}
+            # Little-endian -> big-endian for human-readable timestamp
+            mtime_be="${mtime_le:6:2}${mtime_le:4:2}${mtime_le:2:2}${mtime_le:0:2}"
+            mtime_dec=$((16#${mtime_be}))
+            if [ "$mtime_dec" -ne 0 ]; then
+              mtime_iso=$(date -u -d "@${mtime_dec}" '+%Y-%m-%dT%H:%M:%SZ')
+            else
+              mtime_iso='(zeroed)'
+            fi
+            printf '%-52s method=%s flags=%s mtime=%s xfl=%s os=%s\n' \
+              "$name" "$method" "$flags" "$mtime_iso" "$xfl" "$os" \
+              >> out/gzip-header.txt
+          done
+          cat out/gzip-header.txt
+
+      - name: Dissect tar layer (order, uid/gid, perms, mtime, sha256)
+        run: |
+          set -euo pipefail
+          mkdir -p out/tar
+          for f in tarballs/*.tar.gz; do
+            name=$(basename "$f" .tar.gz)
+            # --numeric-owner so uid/gid stay numeric in the listing
+            tar --numeric-owner -tvf "$f" > "out/tar/${name}.list"
+          done
+          # Per-entry sha256 for the MVP target
+          mkdir -p work/mvp
+          tar -xzf "tarballs/${MVP_NAME}" -C work/mvp
+          ( cd work/mvp && find . -type f | sort | xargs sha256sum ) \
+            > out/tar/${MVP_NAME%.tar.gz}.sha256
+          echo "--- MVP tar listing ---"
+          cat "out/tar/${MVP_NAME%.tar.gz}.list"
+          echo "--- MVP per-file sha256 ---"
+          cat "out/tar/${MVP_NAME%.tar.gz}.sha256"
+
+      - name: Extract every tarball for binary inspection
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          for f in tarballs/*.tar.gz; do
+            name=$(basename "$f" .tar.gz)
+            mkdir -p "work/${name}"
+            tar -xzf "$f" -C "work/${name}"
+          done
+          ls work
+
+      - name: Per-ELF fingerprint (header, build-id, .comment, NEEDED)
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          : > out/elf-fingerprint.txt
+          for d in work/*/; do
+            name=$(basename "$d")
+            for bin in "$d"SBFspot "$d"SBFspotUploadDaemon; do
+              [ -f "$bin" ] || continue
+              echo "=== ${name} :: $(basename "$bin") ==="
+              echo "size: $(stat -c%s "$bin") bytes"
+              file "$bin"
+              readelf -h "$bin" | grep -E 'Class|OS/ABI|Type|Machine'
+              # build-id (may be absent)
+              readelf -n "$bin" 2>/dev/null | grep -A1 'build-id' || echo '(no build-id)'
+              # compiler / toolchain
+              readelf -p .comment "$bin" 2>/dev/null || echo '(no .comment section)'
+              # dynamic deps
+              readelf -d "$bin" | grep NEEDED || echo '(no dynamic deps)'
+              echo
+            done
+          done | tee out/elf-fingerprint.txt
+
+      - name: Per-tarball non-binary payload sha256
+        run: |
+          set -euo pipefail
+          : > out/payload-sha256.txt
+          for d in work/*/; do
+            name=$(basename "$d")
+            for f in "$d"*; do
+              base=$(basename "$f")
+              # Skip the two binaries — fingerprinted separately above
+              case "$base" in
+                SBFspot|SBFspotUploadDaemon) continue ;;
+              esac
+              printf '%-52s %s  %s\n' \
+                "$name" "$(sha256sum "$f" | awk '{print $1}')" "$base" \
+                >> out/payload-sha256.txt
+            done
+          done
+          # One distinct sha256 per filename across all tarballs means
+          # the non-binary payload is byte-identical (fingerprint.md claim).
+          echo "--- distinct sha256 per filename ---"
+          awk '{print $3, $2}' out/payload-sha256.txt | sort -u
+
+      - name: Upload dissection artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: v3.9.12-fingerprint
+          path: |
+            tarball-sha256.txt
+            out/
+          retention-days: 90
