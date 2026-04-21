@@ -40,11 +40,11 @@ Makefile targets (`SBFspot/makefile`):
 - Pin Debian archives to [snapshot.debian.org](http://snapshot.debian.org). Raspbian snapshot is non-functional (Phase 0); **arm builds need a Raspbian rootfs (Phase 1 finding) so the Raspbian pin is unavoidable** — strategy TBD per Decision 2 below.
 - Runner strategy is TBD until Phase 0 closes. Working hypothesis: `ubuntu-24.04-arm` for native ARM, `ubuntu-latest` + `debootstrap` + `qemu-user-static` as fallback.
 
-## Open decisions (sign-off required before Phase 2)
+## Decisions (signed off before Phase 2, 2026-04-21)
 
-1. **Reproducibility bar.** (a) normalised-ELF match after strip + zeroing build-id / `.comment`, or (b) raw tarball `sha256` match. Phase 1 showed (b) is unreachable without reproducing upstream's Windows-side gzip write path (`os=00`, `xfl=04`, populated wall-clock `mtime`). **Recommend default (a);** leave the gzip-writer exercise for Phase 3 if time permits.
-2. **Snapshot pinning strategy.** For Debian (arm64 + all shared parts): (i) per-release-tag date on `snapshot.debian.org`, (ii) single date near V3.9.12 (2025-02-22) for everything, (iii) live archive. Default (i). For **Raspbian** (arm variants, Phase 1 finding): (A) pin live `archive.raspbian.org` and measure drift, (B) bake a Raspbian rootfs at a known-good date and cache it on GHCR, (C) accept arm raw-tarball sha256 will always drift. MVP uses (A); re-evaluate after Phase 2.
-3. **DB variant order for Phase 5.** Hypothesis: `sqlite → nosql → mariadb` (mariadb needs extra build deps).
+1. **Reproducibility bar: (a) normalised-ELF match** — strip + zero build-id / `.comment`, compare byte-for-byte. Raw tarball `sha256` match (option b) is unreachable without reproducing upstream's Windows-side gzip write path (`os=00`, `xfl=04`, populated wall-clock `mtime`); revisit in Phase 3 only if time permits.
+2. **Snapshot pinning:** **Debian = (i) per-release-tag date on `snapshot.debian.org`** (V3.9.12 → `20250222T000000Z`). **Raspbian = (A) live `archive.raspbian.org`**, measure drift from actual build runs; re-evaluate after Phase 2 (fallback plan is option B — bake rootfs at known-good date and cache on GHCR).
+3. **DB variant order for Phase 5: sqlite (MVP) → nosql (5d) → mariadb (5e).** `nosql` is the simpler delta (no DB lib, no `SBFspotUploadDaemon`); `mariadb` pulls in `libmariadbclient-dev` and openssl/gnutls transitively.
 
 ## Phased plan
 
@@ -61,7 +61,7 @@ Stop for review between phases. One artefact per phase.
 
 ## Current phase
 
-Phase 1 complete (local dissection of all 15 V3.9.12 Linux release tarballs; summary in `docs/fingerprint.md`). Phase 0 probe workflow kept but frozen behind `.github/workflows/.probe-trigger`. Awaiting approval on the three open decisions before advancing to Phase 2.
+Phase 1 complete. Local dissection of all 15 V3.9.12 Linux release tarballs in `docs/fingerprint.md`; CI audit reproducing it on `ubuntu-latest` at `.github/workflows/fingerprint.yml` (frozen behind `.fingerprint-trigger`, last run `24737026571` green, artefact retained 90 days). Phase 0 probe workflow kept and frozen behind `.github/workflows/.probe-trigger`. Three open decisions signed off 2026-04-21; advancing to Phase 2.
 
 ### Phase 0 findings
 
