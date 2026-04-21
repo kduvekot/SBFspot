@@ -61,7 +61,7 @@ Stop for review between phases. One artefact per phase.
 
 ## Current phase
 
-Phase 1 complete. Local dissection of all 15 V3.9.12 Linux release tarballs in `docs/fingerprint.md`; CI audit reproducing it on `ubuntu-latest` at `.github/workflows/fingerprint.yml` (frozen behind `.fingerprint-trigger`, last run `24737026571` green, artefact retained 90 days). Phase 0 probe workflow kept and frozen behind `.github/workflows/.probe-trigger`. Three open decisions signed off 2026-04-21; advancing to Phase 2.
+Phase 2 complete. First green end-to-end run at `.github/workflows/release.yml`, frozen behind `.release-trigger`. Run `24742260942` (artefact `release-mvp-sqlite-arm-bookworm`, 90-day retention) holds the upstream asset, our build, the rootfs package manifest, and full diffoscope output. Baseline + diff observations recorded in `docs/phase2-baseline.md`. Phase 1 CI audit at `.github/workflows/fingerprint.yml` (frozen behind `.fingerprint-trigger`, last run `24737026571` green). Phase 0 probe workflow kept and frozen behind `.github/workflows/.probe-trigger`. Three decisions signed off 2026-04-21. **Advancing to Phase 3** — minimise diffs down to the irreducible set.
 
 ### Phase 0 findings
 
@@ -103,9 +103,10 @@ Accept as irreducible (document, don't fight): gzip `os`/`xfl`/populated `mtime`
 
 - `.github/workflows/probe.yml` — Phase 0 feasibility probe. Kept as reference, frozen behind `.github/workflows/.probe-trigger` so it does not auto-run.
 - `.github/workflows/fingerprint.yml` — Phase 1 CI audit (planned next increment). Reproduces the local dissection on GitHub Actions so `docs/fingerprint.md` is auditable by third parties.
-- `.github/workflows/release.yml` — the real pipeline (Phase 2+).
+- `.github/workflows/release.yml` — the release pipeline (Phase 2 MVP in place, Phase 3 is iterating it). Frozen behind `.release-trigger`.
 - `docs/fingerprint.md` — Phase 1 output, target spec for Phase 2.
-- `docs/reproducibility.md` — documented remaining diffoscope differences + rationale (Phase 3+).
+- `docs/phase2-baseline.md` — Phase 2 end state: first-run artefact pin, reducible-vs-irreducible diff breakdown, Phase 3 entry list.
+- `docs/reproducibility.md` — final remaining diffoscope differences + rationale (Phase 3 exit).
 - `CLAUDE.md` — this file.
 
 ## Related repos
