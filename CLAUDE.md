@@ -15,14 +15,14 @@ We produce **no** behavioural changes to SBFspot. The only files added here are 
 
 ## Upstream tarball shape (what we're reproducing)
 
-Upstream V3.9.12 (released 2025-02-22) ships 18 tarballs hand-built by the maintainer:
+Upstream V3.9.12 (released 2025-02-22) ships **15 Linux tarballs** hand-built by the maintainer (the full release asset set is 17: 15 tarballs + 2 Windows zips we don't reproduce):
 
 - Codenames: `buster`, `bullseye`, `bookworm`
-- Architectures: `armhf`, `arm64`
+- Architectures: `arm` (= Debian armhf under the hood), `arm64`
 - DB variants: `sqlite`, `mariadb`, `nosql`
-- Minus `buster × arm64` (upstream has no arm64 for buster): 3 × 2 × 3 − 3 = **18** assets
+- Minus `buster × arm64` (upstream has no arm64 for buster): 3 × 2 × 3 − (1 × 1 × 3) = **15** tarballs
 
-Naming (exact): `sbfspot-<db>-<arch>-linux-<codename>.tar.gz` — e.g. `sbfspot-sqlite-armhf-linux-bookworm.tar.gz`.
+Naming (exact): `sbfspot-<db>-<arch>-linux-<codename>.tar.gz` — e.g. `sbfspot-sqlite-arm-linux-bookworm.tar.gz`. Note the filename uses `arm`, not `armhf`.
 
 Makefile targets (`SBFspot/makefile`):
 - `nosql` — base sources, no `-DUSE_*`, libs `pthread bluetooth boost_date_time boost_system`
@@ -51,12 +51,12 @@ Makefile targets (`SBFspot/makefile`):
 Stop for review between phases. One artefact per phase.
 
 - **Phase 0 — Setup + probes.** This CLAUDE.md; throwaway probe workflow confirming (i) `ubuntu-24.04-arm` is aarch64, (ii) a 32-bit ARM binary built in an armhf debootstrap chroot executes natively, (iii) `snapshot.debian.org` is reachable and usable by debootstrap, (iv) Raspbian snapshot status.
-- **Phase 1 — Fingerprint V3.9.12.** Read upstream makefile at the tag, download all 18 release assets, tabulate tar / gzip / mtime / uid-gid / perms metadata, per-ELF `readelf -h/-a/-d`, `objdump -p`, build-id, `.comment`, `ldd`. Produce `fingerprint.md`.
-- **Phase 2 — MVP for one combo.** Build `sqlite × armhf × bookworm` against V3.9.12. `diffoscope` vs upstream asset; publish diff as artefact.
+- **Phase 1 — Fingerprint V3.9.12.** Read upstream makefile at the tag, download all 15 Linux release tarballs, tabulate tar / gzip / mtime / uid-gid / perms metadata, per-ELF `readelf -h/-a/-d`, `objdump -p`, build-id, `.comment`, `ldd`. Produce `fingerprint.md`.
+- **Phase 2 — MVP for one combo.** Build `sqlite × arm × bookworm` against V3.9.12. `diffoscope` vs upstream asset; publish diff as artefact.
 - **Phase 3 — Minimise V3.9.12 diffs** down to the irreducible set from `fingerprint.md` (at minimum: build-id hash, `.comment` compiler-version string).
 - **Phase 4 — Back-test V3.9.11 and V3.9.10** on the same one combo. Gate: all three versions hit the same bar before matrix expansion.
 - **Phase 5 — Incremental matrix.** 5a bullseye, 5b buster, 5c arm64, 5d nosql, 5e mariadb. Introduce `actions/cache` on the debootstrap rootfs starting 5a (first repeat codename).
-- **Phase 6 — Trixie.** 6 new cells (`trixie × {armhf,arm64} × {sqlite,nosql,mariadb}`). No upstream comparison (no tarballs exist); verify binaries run in a fresh trixie rootfs and pass smoke checks.
+- **Phase 6 — Trixie.** 6 new cells (`trixie × {arm,arm64} × {sqlite,nosql,mariadb}`). No upstream comparison (no tarballs exist); verify binaries run in a fresh trixie rootfs and pass smoke checks.
 - **Phase 7 — Upstream contribution.** Separate session: open an issue at `SBFspot/SBFspot` with links to the green workflow + diffoscope report, offer a PR.
 
 ## Current phase
@@ -79,4 +79,4 @@ Phase 0. No CI exists yet beyond the probe workflow.
 
 ## Tooling note
 
-The Claude Code GitHub MCP in this session is scoped to `kduvekot/sbfspot` only. Reading upstream (`SBFspot/SBFspot`) release assets and source — and the rpi1-build reference — requires `WebFetch` against raw GitHub URLs, not MCP. Phase 1 dissection of the 18 upstream tarballs needs this access; re-check at Phase 1 start.
+The Claude Code GitHub MCP in this session is scoped to `kduvekot/sbfspot` only. For everything outside that scope (upstream `SBFspot/SBFspot` source + release assets, the `kduvekot/sbfspot-rpi1-build` reference), use the `gh` CLI — the session env has `GH_TOKEN` set to a fine-grained PAT that reads those public repos fine. Install latest from `github.com/cli/cli/releases`. This path is what makes Phase 1 tarball dissection and workflow triggering tractable.
