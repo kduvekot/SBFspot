@@ -16,14 +16,14 @@ name: Phase 0 probe (throwaway)
 
 on:
   workflow_dispatch:
-  # workflow_dispatch alone won't fire for a file absent from the default
-  # branch. Scoped push trigger is the workaround: touching the trigger
-  # file re-runs the probe without editing probe.yml itself.
+  # Probe is frozen — only re-runs when .probe-trigger is explicitly
+  # touched and pushed. Editing probe.yml itself no longer auto-fires.
+  # workflow_dispatch also works once this branch merges to the default
+  # branch (pre-merge, dispatch lookups return 404 from the API).
   push:
     branches:
       - claude/add-ci-release-pipeline-QKIcZ
     paths:
-      - .github/workflows/probe.yml
       - .github/workflows/.probe-trigger
 
 jobs:
