@@ -61,7 +61,7 @@ Stop for review between phases. One artefact per phase.
 
 ## Current phase
 
-Phase 2 complete. First green end-to-end run at `.github/workflows/release.yml`, frozen behind `.release-trigger`. Run `24742260942` (artefact `release-mvp-sqlite-arm-bookworm`, 90-day retention) holds the upstream asset, our build, the rootfs package manifest, and full diffoscope output. Baseline + diff observations recorded in `docs/phase2-baseline.md`. Phase 1 CI audit at `.github/workflows/fingerprint.yml` (frozen behind `.fingerprint-trigger`, last run `24737026571` green). Phase 0 probe workflow kept and frozen behind `.github/workflows/.probe-trigger`. Three decisions signed off 2026-04-21. **Advancing to Phase 3** — minimise diffs down to the irreducible set.
+Phase 3.1 complete. The three reducible tar-layer diffs from the Phase 2 baseline (CRLF line endings on 8 text files, `tar --format=ustar` vs GNU, second-precise mtimes) are fixed. Run `24745197356` (artefact `release-mvp-sqlite-arm-bookworm`, 90-day retention) holds the upstream asset, our build, rootfs package manifest, and fresh diffoscope output. The diffoscope `file list` section now shows only the two ELF binaries differing, and only in size + mtime — all 10 non-binary entries are byte-identical to upstream. Top-level diff collapsed from ~694k lines to 591k lines; the surviving 591k is entirely the Raspbian toolchain drift (`+rpi1` → `+rpi1+deb12u1`) propagating through statically-linked libstdc++ object code. Sha256 `a5c518d9...` (Phase 2 was `bb8f5def...`). Full writeup in `docs/phase3.1-baseline.md`. Phase 2 baseline preserved in `docs/phase2-baseline.md` for the starting reference. Phase 1 CI audit at `.github/workflows/fingerprint.yml` (frozen, last green `24737026571`); Phase 0 probe frozen behind `.github/workflows/.probe-trigger`. **Next gate: Phase 3.2 — Decision 2B. Pin the Raspbian toolchain via a baked rootfs cached on GHCR, or accept the drift as irreducible.**
 
 ### Phase 0 findings
 
@@ -106,6 +106,7 @@ Accept as irreducible (document, don't fight): gzip `os`/`xfl`/populated `mtime`
 - `.github/workflows/release.yml` — the release pipeline (Phase 2 MVP in place, Phase 3 is iterating it). Frozen behind `.release-trigger`.
 - `docs/fingerprint.md` — Phase 1 output, target spec for Phase 2.
 - `docs/phase2-baseline.md` — Phase 2 end state: first-run artefact pin, reducible-vs-irreducible diff breakdown, Phase 3 entry list.
+- `docs/phase3.1-baseline.md` — Phase 3.1 end state: CRLF + tar ustar + second-precise mtimes applied, tar-entry parity achieved, surviving diff attributed to the Raspbian `+rpi1+deb12u1` toolchain drift. Presents Phase 3.2 options.
 - `docs/reproducibility.md` — final remaining diffoscope differences + rationale (Phase 3 exit).
 - `CLAUDE.md` — this file.
 
