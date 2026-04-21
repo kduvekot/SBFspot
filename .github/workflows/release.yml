@@ -1,0 +1,307 @@
+name: Phase 2 release MVP (sqlite x arm x bookworm)
+
+# Builds SBFspot against upstream V3.9.12 for the single MVP combo
+# sqlite x arm (armhf) x bookworm, assembles the tarball the same
+# way upstream does, and runs diffoscope vs the upstream asset.
+#
+# Target: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+# sha256: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+#
+# Reproducibility bar: normalised-ELF match (Decision 1a). Gzip
+# wrapper, individual build-id hashes, and wall-clock mtimes on
+# freshly-built binaries are accepted as irreducible — see
+# docs/fingerprint.md "Expected irreducible diffs".
+#
+# Rootfs pin: live archive.raspbian.org (Decision 2A). First run is
+# a baseline — drift is what we measure across subsequent runs.
+#
+# Frozen behind .release-trigger: touch + push the trigger file to
+# fire. workflow_dispatch works once merged to the default branch.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.release-trigger
+
+jobs:
+  release-mvp:
+    name: Build + diffoscope sqlite x arm x bookworm
+    runs-on: ubuntu-24.04-arm
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+      ASSET_NAME: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+      ASSET_SHA256: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+      RASPBIAN_MIRROR: http://archive.raspbian.org/raspbian
+      RASPBIAN_SUITE: bookworm
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap diffoscope xxd binutils file curl jq
+
+      - name: Fetch Raspbian archive keyring
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          # Raspbian publishes the archive signing key as an armoured
+          # text blob. Dearmor to a binary keyring that debootstrap
+          # accepts via --keyring.
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+          gpg --no-default-keyring --keyring keyring/raspbian.gpg --list-keys
+
+      - name: Debootstrap Raspbian bookworm armhf (live archive)
+        run: |
+          set -euxo pipefail
+          sudo debootstrap \
+            --arch=armhf \
+            --variant=minbase \
+            --keyring=$PWD/keyring/raspbian.gpg \
+            --include=ca-certificates \
+            "${RASPBIAN_SUITE}" \
+            rootfs \
+            "${RASPBIAN_MIRROR}"
+          # Confirm the rootfs is armhf and record key toolchain files
+          # so we can reason about drift across runs.
+          file rootfs/bin/ls
+          sudo chroot rootfs /bin/sh -c 'cat /etc/os-release; dpkg -l | head'
+
+      - name: Record rootfs package manifest (drift baseline)
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          sudo chroot rootfs /bin/sh -c \
+            'dpkg-query -W -f="${Package}\t${Version}\t${Architecture}\n"' \
+            | sort > out/rootfs-packages.txt
+          wc -l out/rootfs-packages.txt
+          head -20 out/rootfs-packages.txt
+
+      - name: Check out upstream V3.9.12
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.TAG }}
+          path: upstream
+
+      - name: Stage source tree inside rootfs
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a upstream/SBFspot             rootfs/src/
+          sudo cp -a upstream/SBFspotUploadDaemon rootfs/src/
+          sudo cp -a upstream/SBFspotUploadCommon rootfs/src/
+          sudo chroot rootfs /bin/sh -c 'ls /src && ls /src/SBFspot | head'
+
+      - name: Install build deps in the chroot
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              g++ make \
+              libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              libsqlite3-dev \
+              libcurl4-openssl-dev \
+              binutils file
+            g++ --version
+            dpkg-query -W -f="${Package}\t${Version}\n" \
+              g++ libstdc++-12-dev \
+              libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              libsqlite3-dev libcurl4-openssl-dev 2>/dev/null || true
+          '
+
+      - name: Build SBFspot + SBFspotUploadDaemon (sqlite) inside chroot
+        run: |
+          set -euxo pipefail
+          # Phase 1 finding: arm x bookworm statically links libstdc++
+          # and emits no build-id. Force both via LDFLAGS so we don't
+          # depend on Raspbian linker defaults we don't fully
+          # understand yet. Keep the makefile's -s (strip at link).
+          EXTRA_LDFLAGS='-static-libstdc++ -Wl,--build-id=none'
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make sqlite LDFLAGS='-s ${EXTRA_LDFLAGS}'
+            file sqlite/bin/SBFspot
+            readelf -n sqlite/bin/SBFspot 2>/dev/null | grep -A1 build-id || echo '(no build-id — as intended)'
+            readelf -d sqlite/bin/SBFspot | grep NEEDED || true
+
+            cd /src/SBFspotUploadDaemon
+            make sqlite LDFLAGS='-s ${EXTRA_LDFLAGS}'
+            file sqlite/bin/SBFspotUploadDaemon
+            readelf -d sqlite/bin/SBFspotUploadDaemon | grep NEEDED || true
+          "
+
+      - name: Stage tarball contents (12 entries, 0777, pinned mtimes)
+        run: |
+          set -euxo pipefail
+          mkdir -p staging
+
+          # Binaries
+          sudo cp rootfs/src/SBFspot/sqlite/bin/SBFspot staging/
+          sudo cp rootfs/src/SBFspotUploadDaemon/sqlite/bin/SBFspotUploadDaemon staging/
+
+          # Non-binary payload (all byte-identical across 15 upstream
+          # tarballs per fingerprint.md; mtimes below are the ones
+          # upstream preserves from its filesystem checkout)
+          cp upstream/SBFspot/CreateSQLiteDB.sql     staging/
+          cp upstream/SBFspot/date_time_zonespec.csv staging/
+          cp upstream/SBFspot/SBFspot.cfg            staging/SBFspot.default.cfg
+          cp upstream/SBFspot/TagListDE-DE.txt       staging/
+          cp upstream/SBFspot/TagListEN-US.txt       staging/
+          cp upstream/SBFspot/TagListES-ES.txt       staging/
+          cp upstream/SBFspot/TagListFR-FR.txt       staging/
+          cp upstream/SBFspot/TagListIT-IT.txt       staging/
+          cp upstream/SBFspot/TagListNL-NL.txt       staging/
+          cp upstream/SBFspotUploadDaemon/SBFspotUpload.default.cfg staging/
+
+          # Upstream perms: 0777 on every entry (fingerprint.md)
+          sudo chown $USER:$USER staging/*
+          chmod 0777 staging/*
+
+          # Upstream mtimes per fingerprint.md "Non-binary payload" table.
+          # Binaries get wall-clock — that's an accepted irreducible diff.
+          touch -d '2024-02-13 13:36' staging/CreateSQLiteDB.sql
+          touch -d '2021-01-17 18:43' staging/date_time_zonespec.csv
+          touch -d '2024-02-13 13:36' staging/SBFspot.default.cfg
+          touch -d '2024-04-29 08:52' staging/SBFspotUpload.default.cfg
+          touch -d '2024-02-13 13:36' staging/TagListDE-DE.txt
+          touch -d '2024-06-15 17:28' staging/TagListEN-US.txt
+          touch -d '2024-02-13 13:36' staging/TagListES-ES.txt
+          touch -d '2024-02-13 13:36' staging/TagListFR-FR.txt
+          touch -d '2024-02-13 13:36' staging/TagListIT-IT.txt
+          touch -d '2024-02-13 13:36' staging/TagListNL-NL.txt
+
+          ls -la staging/
+
+      - name: Assemble tarball (pinned member order)
+        run: |
+          set -euxo pipefail
+          # Hand-pin the member order to the one observed in the
+          # upstream listing — bypasses locale-dependent sort.
+          cat > staging/.members <<'EOF'
+          CreateSQLiteDB.sql
+          date_time_zonespec.csv
+          SBFspot
+          SBFspot.default.cfg
+          SBFspotUpload.default.cfg
+          SBFspotUploadDaemon
+          TagListDE-DE.txt
+          TagListEN-US.txt
+          TagListES-ES.txt
+          TagListFR-FR.txt
+          TagListIT-IT.txt
+          TagListNL-NL.txt
+          EOF
+
+          ( cd staging && \
+            tar --owner=0 --group=0 --numeric-owner \
+                -T .members \
+                -cf ../sbfspot-sqlite-arm-linux-bookworm.tar \
+          )
+
+          # -n zeros gzip mtime (upstream has populated wall-clock
+          # mtime, so this will diff — accepted per fingerprint.md).
+          # --fast matches upstream's xfl=04; Windows os=00 we cannot
+          # match from a Linux writer (accepted).
+          gzip -n --fast sbfspot-sqlite-arm-linux-bookworm.tar
+
+          ls -la sbfspot-sqlite-arm-linux-bookworm.tar.gz
+          sha256sum sbfspot-sqlite-arm-linux-bookworm.tar.gz
+
+      - name: Download upstream asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          url=$(curl -sSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
+            | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .browser_download_url')
+          curl -sSL -O "$url"
+          echo "${ASSET_SHA256}  ${ASSET_NAME}" | sha256sum -c -
+
+      - name: diffoscope vs upstream
+        run: |
+          set -uxo pipefail
+          mkdir -p out
+          diffoscope --version
+
+          # Raw tarball compare (includes gzip wrapper and binary
+          # contents). Non-zero exit is expected until irreducible
+          # diffs match the fingerprint.md list.
+          diffoscope \
+            --html out/diffoscope.html \
+            --text out/diffoscope.txt \
+            --max-report-size 100000000 \
+            "${ASSET_NAME}" \
+            sbfspot-sqlite-arm-linux-bookworm.tar.gz \
+            || true
+
+          echo "=== diffoscope text head ==="
+          head -200 out/diffoscope.txt || true
+          echo "=== diffoscope text size ==="
+          wc -l out/diffoscope.txt
+
+      - name: Normalised-ELF compare (Decision 1a bar)
+        run: |
+          set -uxo pipefail
+          mkdir -p out/ours out/upstream
+          tar -xzf "${ASSET_NAME}" -C out/upstream
+          tar -xzf sbfspot-sqlite-arm-linux-bookworm.tar.gz -C out/ours
+
+          for bin in SBFspot SBFspotUploadDaemon; do
+            echo "=== ${bin}: normalised-ELF compare ==="
+            # Strip + zero out build-id (already absent in our build,
+            # may be present upstream) + zero .comment to isolate
+            # compiler-version string differences.
+            for side in upstream ours; do
+              cp "out/${side}/${bin}" "out/${side}/${bin}.norm"
+              strip --strip-all "out/${side}/${bin}.norm" || true
+              # Objcopy to zero .comment and .note.gnu.build-id if
+              # present. These are the sections we bless as
+              # irreducible per Decision 1a.
+              objcopy \
+                --remove-section=.comment \
+                --remove-section=.note.gnu.build-id \
+                "out/${side}/${bin}.norm" 2>/dev/null || true
+            done
+
+            size_up=$(stat -c%s "out/upstream/${bin}.norm")
+            size_ours=$(stat -c%s "out/ours/${bin}.norm")
+            sha_up=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+            sha_ours=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+
+            printf 'upstream: size=%s sha256=%s\n' "$size_up"  "$sha_up"
+            printf 'ours:     size=%s sha256=%s\n' "$size_ours" "$sha_ours"
+
+            if [ "$sha_up" = "$sha_ours" ]; then
+              echo "MATCH: normalised-ELF sha256 equal for ${bin}"
+            else
+              echo "DIFF: normalised-ELF sha256 differ for ${bin} (expected on first run)"
+              diffoscope \
+                --html "out/diffoscope-${bin}.html" \
+                --text "out/diffoscope-${bin}.txt" \
+                --max-report-size 100000000 \
+                "out/upstream/${bin}.norm" \
+                "out/ours/${bin}.norm" || true
+            fi
+          done
+
+      - name: Upload build artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-mvp-sqlite-arm-bookworm
+          path: |
+            sbfspot-sqlite-arm-linux-bookworm.tar.gz
+            out/
+          retention-days: 90
