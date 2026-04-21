@@ -1,0 +1,144 @@
+name: Phase 0 probe (throwaway)
+
+# Feasibility probes for the CI release pipeline. Deleted before Phase 2.
+# Answers four questions:
+#   (1) Is the ubuntu-24.04-arm runner actually aarch64?
+#   (2) Does AArch32 native exec work on that runner (i.e. can we run
+#       armhf binaries without qemu-user-static)?
+#   (3) Is snapshot.debian.org reachable and usable by debootstrap on a
+#       date near the V3.9.12 release (2025-02-22)?
+#   (4) Is there a Raspbian snapshot service, or do we have to document
+#       a fallback?
+#
+# Job 1 (probe-aarch64) answers (1)+(2)+(3 for arm).
+# Job 2 (probe-qemu) is the control — same bootstrap via qemu on x86_64.
+# Job 3 (probe-raspbian) answers (4) with HEAD requests.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe-aarch64:
+    name: aarch64 runner + native AArch32 + Debian snapshot
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Runner identity
+        run: |
+          set -euo pipefail
+          echo "uname -a: $(uname -a)"
+          echo "uname -m: $(uname -m)"
+          test "$(uname -m)" = "aarch64"
+          cat /proc/cpuinfo | head -40 || true
+          echo "---"
+          # AArch32 kernel support advertised in HWCAP?
+          cat /proc/sys/kernel/arch 2>/dev/null || true
+          grep -E '^(processor|model name|CPU implementer|CPU architecture|Features)' /proc/cpuinfo | head -20 || true
+
+      - name: Install debootstrap (no qemu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap debian-archive-keyring
+
+      - name: Debootstrap armhf bookworm from snapshot.debian.org
+        run: |
+          set -euxo pipefail
+          # Snapshot date near V3.9.12 (2025-02-22). debootstrap accepts a
+          # snapshot URL as the mirror argument directly.
+          SNAP='https://snapshot.debian.org/archive/debian/20250222T000000Z'
+          sudo debootstrap \
+            --arch=armhf \
+            --variant=minbase \
+            --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
+            bookworm \
+            rootfs \
+            "$SNAP"
+          sudo ls rootfs/bin/ | head
+          file rootfs/bin/ls
+
+      - name: Exec armhf binary via chroot (no qemu) — the AArch32 test
+        id: native
+        run: |
+          set -euxo pipefail
+          # If the silicon+kernel support AArch32 native exec, this runs.
+          # If not, expect ENOEXEC / illegal instruction.
+          if sudo chroot rootfs /bin/sh -c 'uname -m; /bin/true; echo AARCH32_OK'; then
+            echo "result=native" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Build + run a 32-bit ARM hello-world inside the rootfs
+        if: steps.native.outputs.result == 'native'
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc '
+            apt-get update
+            apt-get install -y --no-install-recommends gcc libc6-dev
+            cat > /tmp/hello.c <<EOF
+          #include <stdio.h>
+          int main(void){ puts("hello from armhf"); return 0; }
+          EOF
+            gcc -O2 -o /tmp/hello /tmp/hello.c
+            file /tmp/hello
+            readelf -h /tmp/hello | grep -E "Class|Machine"
+            /tmp/hello
+          '
+
+  probe-qemu:
+    name: qemu-user-static control (x86_64 -> armhf)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install debootstrap + qemu-user-static
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap qemu-user-static binfmt-support debian-archive-keyring
+
+      - name: Debootstrap armhf bookworm (foreign + second-stage)
+        run: |
+          set -euxo pipefail
+          SNAP='https://snapshot.debian.org/archive/debian/20250222T000000Z'
+          sudo debootstrap \
+            --arch=armhf \
+            --foreign \
+            --variant=minbase \
+            --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
+            bookworm \
+            rootfs \
+            "$SNAP"
+          sudo cp /usr/bin/qemu-arm-static rootfs/usr/bin/
+          sudo chroot rootfs /debootstrap/debootstrap --second-stage
+
+      - name: Build + run armhf hello-world under qemu
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc '
+            apt-get update
+            apt-get install -y --no-install-recommends gcc libc6-dev
+            cat > /tmp/hello.c <<EOF
+          #include <stdio.h>
+          int main(void){ puts("hello from armhf-qemu"); return 0; }
+          EOF
+            gcc -O2 -o /tmp/hello /tmp/hello.c
+            file /tmp/hello
+            /tmp/hello
+          '
+
+  probe-raspbian:
+    name: Raspbian snapshot service probe
+    runs-on: ubuntu-latest
+    steps:
+      - name: HEAD candidate Raspbian snapshot endpoints
+        run: |
+          set -uxo pipefail
+          urls=(
+            "https://snapshot.raspbian.org/"
+            "https://snapshot.raspbian.org/archive/raspbian/20250222T000000Z/"
+            "http://archive.raspbian.org/raspbian/dists/bookworm/Release"
+            "https://archive.raspberrypi.org/debian/dists/bookworm/Release"
+          )
+          for u in "${urls[@]}"; do
+            echo "--- $u"
+            curl -sS -o /dev/null -D - --max-time 15 "$u" || echo "FAIL $u"
+            echo
+          done
