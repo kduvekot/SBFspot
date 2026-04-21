@@ -37,13 +37,13 @@ Makefile targets (`SBFspot/makefile`):
 - Only add files outside `SBFspot/` proper; do not touch tracked C++ or the Windows solution.
 - Expand the matrix **one dimension at a time** with a review gate between phases. Never add two dimensions in one phase.
 - Reproducibility toggles from the start: `SOURCE_DATE_EPOCH`, fixed `--build-id` policy, `tar --sort=name` with fixed owner/group/mtime, `gzip -n`.
-- Pin Debian archives to [snapshot.debian.org](http://snapshot.debian.org). Raspbian snapshot availability is unresolved — Phase 0 probes check it; fallback documented on failure.
+- Pin Debian archives to [snapshot.debian.org](http://snapshot.debian.org). Raspbian snapshot is non-functional (Phase 0); **arm builds need a Raspbian rootfs (Phase 1 finding) so the Raspbian pin is unavoidable** — strategy TBD per Decision 2 below.
 - Runner strategy is TBD until Phase 0 closes. Working hypothesis: `ubuntu-24.04-arm` for native ARM, `ubuntu-latest` + `debootstrap` + `qemu-user-static` as fallback.
 
 ## Open decisions (sign-off required before Phase 2)
 
-1. **Reproducibility bar.** (a) normalised-ELF match after strip + zeroing build-id / `.comment`, or (b) raw tarball `sha256` match. Default (a) unless Phase 1 shows (b) is feasible.
-2. **Snapshot pinning strategy.** (i) per-release-tag date, (ii) single date near V3.9.12 (2025-02-22) for everything, (iii) live archive. Default (i).
+1. **Reproducibility bar.** (a) normalised-ELF match after strip + zeroing build-id / `.comment`, or (b) raw tarball `sha256` match. Phase 1 showed (b) is unreachable without reproducing upstream's Windows-side gzip write path (`os=00`, `xfl=04`, populated wall-clock `mtime`). **Recommend default (a);** leave the gzip-writer exercise for Phase 3 if time permits.
+2. **Snapshot pinning strategy.** For Debian (arm64 + all shared parts): (i) per-release-tag date on `snapshot.debian.org`, (ii) single date near V3.9.12 (2025-02-22) for everything, (iii) live archive. Default (i). For **Raspbian** (arm variants, Phase 1 finding): (A) pin live `archive.raspbian.org` and measure drift, (B) bake a Raspbian rootfs at a known-good date and cache it on GHCR, (C) accept arm raw-tarball sha256 will always drift. MVP uses (A); re-evaluate after Phase 2.
 3. **DB variant order for Phase 5.** Hypothesis: `sqlite → nosql → mariadb` (mariadb needs extra build deps).
 
 ## Phased plan
@@ -61,7 +61,7 @@ Stop for review between phases. One artefact per phase.
 
 ## Current phase
 
-Phase 0 complete (run `24731665773`, all three jobs green). Awaiting approval to advance to Phase 1.
+Phase 1 complete (local dissection of all 15 V3.9.12 Linux release tarballs; summary in `docs/fingerprint.md`). Phase 0 probe workflow kept but frozen behind `.github/workflows/.probe-trigger`. Awaiting approval on the three open decisions before advancing to Phase 2.
 
 ### Phase 0 findings
 
@@ -77,13 +77,36 @@ Phase 0 complete (run `24731665773`, all three jobs green). Awaiting approval to
 - `arm64` builds: `ubuntu-24.04-arm` native (arch match); still debootstrap per codename for correct glibc/boost.
 - qemu stays in the toolbox as a fallback, not the default.
 
+### Phase 1 findings
+
+Full detail in `docs/fingerprint.md`. Headline points that change strategy:
+
+- **Source state is clean.** `SBFspot/makefile` at this fork matches V3.9.12 byte-for-byte; no source divergence blocks the rebuild.
+- **Arm builds are Raspbian, arm64 builds are Debian.** Binary `.comment` strings: arm variants all say `GCC: (Raspbian X+rpi1) X`; arm64 variants say `GCC: (Debian X) X`. Bookworm arm64 carries **both** strings — one object (likely a bundled Boost static lib) was compiled on Raspbian and linked into a Debian build. This invalidates a Debian-only pipeline: arm reproducibility needs a Raspbian rootfs.
+- **Upstream does not normalise tarball gzip.** OS byte is `00` (Windows / FAT), `xfl=04` (`gzip --fast`), and `mtime` is the wall-clock time of compression, not zeroed — strongly suggests a Windows-side gzip writer (7-Zip or similar). **No `SOURCE_DATE_EPOCH` in upstream's flow.** Per-file mtimes inside the tar are preserved filesystem mtimes from the maintainer's checkout (ranging 2021-01-17 through 2024-06-15), not normalised. To match raw bytes we'd need either a custom Windows-style gzip writer or a per-file mtime lookup table. Both are punted to Phase 3.
+- **Tar entry layout is normalisable.** Order is lexicographic (`tar --sort=name`), uid/gid=0 everywhere (`--owner=0 --group=0 --numeric-owner`). We match this trivially.
+- **All non-binary payload is byte-identical across all 15 tarballs.** One source checkout, no per-variant post-processing.
+- **`arm × bookworm` is 2–3× the size of its siblings** because it statically links libstdc++ (no `libstdc++.so.6` in `NEEDED`) and has no `.note.gnu.build-id`. Both point at Raspbian Bookworm armhf linker/toolchain defaults rather than explicit flags — but the pipeline can also force them via `-static-libstdc++` and `-Wl,--build-id=none`.
+- **Second binary: `SBFspotUploadDaemon`** — built from `SBFspotUploadDaemon/makefile` (pulls sources from `../SBFspot` and `../SBFspotUploadCommon`), present only in `sqlite` and `mariadb` tarballs, `NEEDED` adds `libcurl` plus the DB lib.
+
+### Phase 2 MVP target
+
+Build `sqlite × arm × bookworm` against V3.9.12. Upstream asset: `sbfspot-sqlite-arm-linux-bookworm.tar.gz` (sha256 `887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0`). First-pass diffoscope goals, in effort order:
+
+1. Match tar layer (sort, uid/gid, per-file mtime lookup).
+2. Ship non-binary payload verbatim from the tag checkout with preserved mtimes.
+3. Build both binaries on a Raspbian Bookworm armhf rootfs with `gcc 12.2.0-14+rpi1`, `-static-libstdc++`, and `-Wl,--build-id=none` for the arm-bookworm combo.
+
+Accept as irreducible (document, don't fight): gzip `os`/`xfl`/populated `mtime`, individual `.note.gnu.build-id` hashes on variants that still emit them, wall-clock mtimes on freshly-built binary entries inside the tar.
+
 ## Files (planned)
 
-- `.github/workflows/probe.yml` — throwaway feasibility probe (Phase 0; deleted once Phase 2 starts)
-- `.github/workflows/release.yml` — the real pipeline (Phase 2+)
-- `docs/fingerprint.md` — Phase 1 output, target spec for Phase 2
-- `docs/reproducibility.md` — documented remaining diffoscope differences + rationale
-- `CLAUDE.md` — this file
+- `.github/workflows/probe.yml` — Phase 0 feasibility probe. Kept as reference, frozen behind `.github/workflows/.probe-trigger` so it does not auto-run.
+- `.github/workflows/fingerprint.yml` — Phase 1 CI audit (planned next increment). Reproduces the local dissection on GitHub Actions so `docs/fingerprint.md` is auditable by third parties.
+- `.github/workflows/release.yml` — the real pipeline (Phase 2+).
+- `docs/fingerprint.md` — Phase 1 output, target spec for Phase 2.
+- `docs/reproducibility.md` — documented remaining diffoscope differences + rationale (Phase 3+).
+- `CLAUDE.md` — this file.
 
 ## Related repos
 
