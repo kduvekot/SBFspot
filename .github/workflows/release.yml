@@ -223,13 +223,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
+          # Save under a distinct filename so we don't clobber the
+          # locally-built tarball (which uses the upstream asset name
+          # by convention).
           url=$(curl -sSL \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
             | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .browser_download_url')
-          curl -sSL -O "$url"
-          echo "${ASSET_SHA256}  ${ASSET_NAME}" | sha256sum -c -
+          curl -sSL -o upstream.tar.gz "$url"
+          echo "${ASSET_SHA256}  upstream.tar.gz" | sha256sum -c -
 
       - name: diffoscope vs upstream
         run: |
@@ -239,17 +242,21 @@ jobs:
 
           # Raw tarball compare (includes gzip wrapper and binary
           # contents). Non-zero exit is expected until irreducible
-          # diffs match the fingerprint.md list.
+          # diffs match the fingerprint.md list. Seed empty output
+          # files so later `head`/`wc` don't fail if diffoscope
+          # silently produces no report.
+          : > out/diffoscope.txt
+          : > out/diffoscope.html
           diffoscope \
             --html out/diffoscope.html \
             --text out/diffoscope.txt \
             --max-report-size 100000000 \
-            "${ASSET_NAME}" \
+            upstream.tar.gz \
             sbfspot-sqlite-arm-linux-bookworm.tar.gz \
             || true
 
           echo "=== diffoscope text head ==="
-          head -200 out/diffoscope.txt || true
+          head -200 out/diffoscope.txt
           echo "=== diffoscope text size ==="
           wc -l out/diffoscope.txt
 
@@ -257,7 +264,7 @@ jobs:
         run: |
           set -uxo pipefail
           mkdir -p out/ours out/upstream
-          tar -xzf "${ASSET_NAME}" -C out/upstream
+          tar -xzf upstream.tar.gz -C out/upstream
           tar -xzf sbfspot-sqlite-arm-linux-bookworm.tar.gz -C out/ours
 
           for bin in SBFspot SBFspotUploadDaemon; do
@@ -304,5 +311,6 @@ jobs:
           name: release-mvp-sqlite-arm-bookworm
           path: |
             sbfspot-sqlite-arm-linux-bookworm.tar.gz
+            upstream.tar.gz
             out/
           retention-days: 90
