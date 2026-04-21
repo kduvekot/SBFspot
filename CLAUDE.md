@@ -61,7 +61,21 @@ Stop for review between phases. One artefact per phase.
 
 ## Current phase
 
-Phase 0. No CI exists yet beyond the probe workflow.
+Phase 0 complete (run `24731665773`, all three jobs green). Awaiting approval to advance to Phase 1.
+
+### Phase 0 findings
+
+- **`ubuntu-24.04-arm` is aarch64.** Azure-hosted VM, 4 cores, Ampere Neoverse V1 (`CPU part 0xd49`), ARMv8-A. Kernel 6.14.0-1017-azure.
+- **AArch32 native exec works on that silicon.** An armhf `gcc` built hello-world ran inside the chroot without qemu and printed `hello from armhf`. `file` reports: `ELF 32-bit LSB pie executable, ARM, EABI5 version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-armhf.so.3, BuildID[sha1]=…, not stripped`. **Implication: the real pipeline can build armhf natively on `ubuntu-24.04-arm` — no qemu on the common path.**
+- **`snapshot.debian.org/archive/debian/20250222T000000Z` works as a `debootstrap` mirror** for armhf bookworm, both on the native-aarch64 path and via `--foreign` + `qemu-arm-static` + `--second-stage` (control job).
+- **`snapshot.raspbian.org` is not a functional snapshot service.** Root page (`/`) returns 200 but `/archive/`, `/archive/raspbian/`, and date URLs in either `YYYYMMDDTHHMMSSZ` or `YYYYMMDD` form return 404. Live `archive.raspbian.org` and `archive.raspberrypi.org` are reachable. Since our critical path is Debian (upstream's armhf tarballs target Debian armhf = ARMv7+), this is **documented risk, not a blocker**. If we ever need Raspbian-specific builds we'll pin against the live archive and accept the reproducibility hit.
+- **qemu-user-static fallback path works too**, proven in the control job; available as a backup for any arch/codename combo that turns out not to exec natively.
+
+### Implications for the matrix
+
+- `arm` (armhf) builds: `ubuntu-24.04-arm` + `debootstrap --arch=armhf` + native AArch32 exec.
+- `arm64` builds: `ubuntu-24.04-arm` native (arch match); still debootstrap per codename for correct glibc/boost.
+- qemu stays in the toolbox as a fallback, not the default.
 
 ## Files (planned)
 
