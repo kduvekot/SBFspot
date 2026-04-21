@@ -42,7 +42,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            debootstrap diffoscope xxd binutils file curl jq
+            debootstrap diffoscope xxd binutils file curl jq \
+            dos2unix
 
       - name: Fetch Raspbian archive keyring
         run: |
@@ -168,18 +169,37 @@ jobs:
           sudo chown $USER:$USER staging/*
           chmod 0777 staging/*
 
-          # Upstream mtimes per fingerprint.md "Non-binary payload" table.
-          # Binaries get wall-clock — that's an accepted irreducible diff.
-          touch -d '2024-02-13 13:36' staging/CreateSQLiteDB.sql
-          touch -d '2021-01-17 18:43' staging/date_time_zonespec.csv
-          touch -d '2024-02-13 13:36' staging/SBFspot.default.cfg
-          touch -d '2024-04-29 08:52' staging/SBFspotUpload.default.cfg
-          touch -d '2024-02-13 13:36' staging/TagListDE-DE.txt
-          touch -d '2024-06-15 17:28' staging/TagListEN-US.txt
-          touch -d '2024-02-13 13:36' staging/TagListES-ES.txt
-          touch -d '2024-02-13 13:36' staging/TagListFR-FR.txt
-          touch -d '2024-02-13 13:36' staging/TagListIT-IT.txt
-          touch -d '2024-02-13 13:36' staging/TagListNL-NL.txt
+          # LF → CRLF on the 8 files that Phase 2 proved ship with
+          # CRLF in the upstream tarball. The other two text files
+          # (SBFspot.default.cfg, date_time_zonespec.csv) are stored
+          # CRLF-in-repo and already byte-identical to upstream.
+          # unix2dos touches mtime, so do this before the mtime pins.
+          for f in \
+              staging/CreateSQLiteDB.sql \
+              staging/SBFspotUpload.default.cfg \
+              staging/TagListDE-DE.txt \
+              staging/TagListEN-US.txt \
+              staging/TagListES-ES.txt \
+              staging/TagListFR-FR.txt \
+              staging/TagListIT-IT.txt \
+              staging/TagListNL-NL.txt; do
+            unix2dos -q "$f"
+          done
+
+          # Upstream mtimes per fingerprint.md + the exact seconds
+          # observed in the upstream tar listing (tar stores Unix
+          # epoch; the runner's UTC timezone displays them as shown).
+          # Binaries keep wall-clock mtime — accepted irreducible.
+          touch -d '2024-02-13 13:36:02 UTC' staging/CreateSQLiteDB.sql
+          touch -d '2021-01-17 18:43:04 UTC' staging/date_time_zonespec.csv
+          touch -d '2024-02-13 13:36:03 UTC' staging/SBFspot.default.cfg
+          touch -d '2024-04-29 08:52:56 UTC' staging/SBFspotUpload.default.cfg
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListDE-DE.txt
+          touch -d '2024-06-15 17:28:09 UTC' staging/TagListEN-US.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListES-ES.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListFR-FR.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListIT-IT.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListNL-NL.txt
 
           ls -la staging/
 
@@ -203,8 +223,10 @@ jobs:
           TagListNL-NL.txt
           EOF
 
+          # --format=ustar: upstream ships plain POSIX tar, not GNU.
           ( cd staging && \
             tar --owner=0 --group=0 --numeric-owner \
+                --format=ustar \
                 -T .members \
                 -cf ../sbfspot-sqlite-arm-linux-bookworm.tar \
           )
