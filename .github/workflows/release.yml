@@ -112,12 +112,13 @@ jobs:
               libcurl4-openssl-dev \
               binutils file
             g++ --version
-            dpkg-query -W -f="${Package}\t${Version}\n" \
-              g++ libstdc++-12-dev \
-              libbluetooth-dev \
-              libboost-date-time-dev libboost-system-dev \
-              libsqlite3-dev libcurl4-openssl-dev 2>/dev/null || true
           '
+          # Extend the drift baseline with the build-deps we actually
+          # pulled in. The earlier packages manifest was minbase only.
+          sudo chroot rootfs /bin/sh -c \
+            'dpkg-query -W -f="${Package}\t${Version}\t${Architecture}\n"' \
+            | sort > out/rootfs-packages.txt
+          wc -l out/rootfs-packages.txt
 
       - name: Build SBFspot + SBFspotUploadDaemon (sqlite) inside chroot
         run: |
