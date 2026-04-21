@@ -1,5 +1,12 @@
 # Phase 3.1 baseline — reducible tar/mtime/CRLF diffs collapsed
 
+> **Correction (Phase 3.2):** This doc's "Surviving reducible:
+> the toolchain drift" section attributes the 591k-line residual
+> diff to `+rpi1` → `+rpi1+deb12u1`. That's wrong; the `+rpi1`
+> rebuild produces the same bytes we produce here. The real
+> cause is Raspbian's original build-farm state. See
+> `docs/phase3.2-baseline.md`.
+
 Second green end-to-end run of the release pipeline, after fixing
 the three reducible diffs listed in `phase2-baseline.md`. Artefact
 lives in GitHub Actions run `24745197356`

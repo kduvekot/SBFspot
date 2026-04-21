@@ -61,7 +61,7 @@ Stop for review between phases. One artefact per phase.
 
 ## Current phase
 
-Phase 3.1 complete. The three reducible tar-layer diffs from the Phase 2 baseline (CRLF line endings on 8 text files, `tar --format=ustar` vs GNU, second-precise mtimes) are fixed. Run `24745197356` (artefact `release-mvp-sqlite-arm-bookworm`, 90-day retention) holds the upstream asset, our build, rootfs package manifest, and fresh diffoscope output. The diffoscope `file list` section now shows only the two ELF binaries differing, and only in size + mtime — all 10 non-binary entries are byte-identical to upstream. Top-level diff collapsed from ~694k lines to 591k lines; the surviving 591k is entirely the Raspbian toolchain drift (`+rpi1` → `+rpi1+deb12u1`) propagating through statically-linked libstdc++ object code. Sha256 `a5c518d9...` (Phase 2 was `bb8f5def...`). Full writeup in `docs/phase3.1-baseline.md`. Phase 2 baseline preserved in `docs/phase2-baseline.md` for the starting reference. Phase 1 CI audit at `.github/workflows/fingerprint.yml` (frozen, last green `24737026571`); Phase 0 probe frozen behind `.github/workflows/.probe-trigger`. **Next gate: Phase 3.2 — Decision 2B. Pin the Raspbian toolchain via a baked rootfs cached on GHCR, or accept the drift as irreducible.**
+Phase 3.2 complete. Probe workflow `.github/workflows/toolchain-probe.yml` (run `24746308004`, 1h42m, 90-day artefact `toolchain-probe-rpi1`) rebuilt `gcc-12_12.2.0-14+rpi1` from the preserved source packages on `archive.raspbian.org`, installed the resulting debs in the chroot, and rebuilt SBFspot V3.9.12 against the pinned toolchain. **Key finding: our Phase 3.1 build (live `+rpi1+deb12u1`) and the Probe (our rebuilt `+rpi1`) produce bit-identical normalised-ELF bytes** (`SBFspot.norm` sha `f5453d9b...`, `SBFspotUploadDaemon.norm` sha `8e86eb58...`). So (a) the 110 KB drift vs upstream V3.9.12 is NOT the `+rpi1`→`+rpi1+deb12u1` bump — `libstdc++.a` is effectively identical across those versions for SBFspot's purposes, and (b) our pipeline is already self-reproducible across runs and toolchain sources. The gap to upstream lives below gcc, in Raspbian's 2025-02-22 build-farm state, which isn't reconstructible from public data. Revised Decision 1a: Bar 1a' (pipeline-internal reproducibility — **met, proven**), Bar 1a'' (upstream-match — documented unreachable). Earlier docs' drift attribution corrected in-place. Full writeup in `docs/phase3.2-baseline.md`. Phase 2 / 3.1 baselines preserved. Phase 1 CI audit frozen at `.github/workflows/fingerprint.yml`; Phase 0 probe frozen. **Next gate: Phase 3.3 — either (i) commit the Probe-built `+rpi1` debs as a repo release asset to insure against future live-archive drift, cheaply; (ii) defer to Phase 4 (V3.9.11 / V3.9.10 back-test against the self-reproducible bar); (iii) full GHCR rootfs bake (heavy, only if drift materialises).**
 
 ### Phase 0 findings
 
@@ -103,10 +103,12 @@ Accept as irreducible (document, don't fight): gzip `os`/`xfl`/populated `mtime`
 
 - `.github/workflows/probe.yml` — Phase 0 feasibility probe. Kept as reference, frozen behind `.github/workflows/.probe-trigger` so it does not auto-run.
 - `.github/workflows/fingerprint.yml` — Phase 1 CI audit (planned next increment). Reproduces the local dissection on GitHub Actions so `docs/fingerprint.md` is auditable by third parties.
-- `.github/workflows/release.yml` — the release pipeline (Phase 2 MVP in place, Phase 3 is iterating it). Frozen behind `.release-trigger`.
+- `.github/workflows/release.yml` — the release pipeline (Phase 2 MVP in place, Phase 3 iterated it). Frozen behind `.release-trigger`.
+- `.github/workflows/toolchain-probe.yml` — Phase 3.2 one-off: source-rebuild of `gcc-12_12.2.0-14+rpi1` and SBFspot build against the pinned toolchain. Frozen behind `.toolchain-probe-trigger`. Last green `24746308004`.
 - `docs/fingerprint.md` — Phase 1 output, target spec for Phase 2.
-- `docs/phase2-baseline.md` — Phase 2 end state: first-run artefact pin, reducible-vs-irreducible diff breakdown, Phase 3 entry list.
-- `docs/phase3.1-baseline.md` — Phase 3.1 end state: CRLF + tar ustar + second-precise mtimes applied, tar-entry parity achieved, surviving diff attributed to the Raspbian `+rpi1+deb12u1` toolchain drift. Presents Phase 3.2 options.
+- `docs/phase2-baseline.md` — Phase 2 end state: first-run artefact pin, reducible-vs-irreducible diff breakdown, Phase 3 entry list. Drift attribution corrected in-place after Phase 3.2.
+- `docs/phase3.1-baseline.md` — Phase 3.1 end state: CRLF + tar ustar + second-precise mtimes applied, tar-entry parity achieved. Drift attribution corrected in-place after Phase 3.2.
+- `docs/phase3.2-baseline.md` — Phase 3.2 end state: source-rebuild probe, pipeline self-reproducibility proven, upstream-match bar documented as unreachable. Revised reproducibility bar.
 - `docs/reproducibility.md` — final remaining diffoscope differences + rationale (Phase 3 exit).
 - `CLAUDE.md` — this file.
 

@@ -1,5 +1,16 @@
 # Phase 2 baseline — sqlite × arm × bookworm (V3.9.12)
 
+> **Correction (Phase 3.2):** The "Raspbian toolchain drift observation"
+> section below attributes the 110 KB `SBFspot` delta to the
+> `+rpi1` → `+rpi1+deb12u1` package bump. **That attribution is
+> wrong.** Phase 3.2 rebuilt `+rpi1` from source and produced
+> bit-identical normalised SBFspot bytes as our `+rpi1+deb12u1`
+> Phase 3.1 build — so `libstdc++.a` object code is effectively
+> unchanged between those two versions as far as SBFspot is
+> concerned. The real cause of the 110 KB drift lives below gcc:
+> Raspbian's build-farm state on 2025-02-22. See
+> `docs/phase3.2-baseline.md`.
+
 First green end-to-end run of the release pipeline. Artefact lives
 in GitHub Actions run `24742260942`
 (`release-mvp-sqlite-arm-bookworm`, 90-day retention) and contains:
