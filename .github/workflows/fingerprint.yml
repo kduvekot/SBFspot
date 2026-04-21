@@ -116,10 +116,11 @@ jobs:
             # --numeric-owner so uid/gid stay numeric in the listing
             tar --numeric-owner -tvf "$f" > "out/tar/${name}.list"
           done
-          # Per-entry sha256 for the MVP target
-          mkdir -p work/mvp
-          tar -xzf "tarballs/${MVP_NAME}" -C work/mvp
-          ( cd work/mvp && find . -type f | sort | xargs sha256sum ) \
+          # Per-entry sha256 for the MVP target (extract outside work/
+          # so the later per-ELF loop doesn't pick it up as a 16th tarball)
+          mkdir -p mvp-extracted
+          tar -xzf "tarballs/${MVP_NAME}" -C mvp-extracted
+          ( cd mvp-extracted && find . -type f | sort | xargs sha256sum ) \
             > out/tar/${MVP_NAME%.tar.gz}.sha256
           echo "--- MVP tar listing ---"
           cat "out/tar/${MVP_NAME%.tar.gz}.list"
