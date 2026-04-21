@@ -17,13 +17,14 @@ name: Phase 0 probe (throwaway)
 on:
   workflow_dispatch:
   # workflow_dispatch alone won't fire for a file absent from the default
-  # branch. Scoped push trigger is the workaround (changes to probe.yml on
-  # this feature branch only). File goes away before Phase 2 anyway.
+  # branch. Scoped push trigger is the workaround: touching the trigger
+  # file re-runs the probe without editing probe.yml itself.
   push:
     branches:
       - claude/add-ci-release-pipeline-QKIcZ
     paths:
       - .github/workflows/probe.yml
+      - .github/workflows/.probe-trigger
 
 jobs:
   probe-aarch64:
@@ -82,7 +83,7 @@ jobs:
           set -euxo pipefail
           sudo chroot rootfs /bin/sh -euxc '
             apt-get update
-            apt-get install -y --no-install-recommends gcc libc6-dev
+            apt-get install -y --no-install-recommends gcc libc6-dev binutils file
             cat > /tmp/hello.c <<EOF
           #include <stdio.h>
           int main(void){ puts("hello from armhf"); return 0; }
@@ -122,13 +123,14 @@ jobs:
           set -euxo pipefail
           sudo chroot rootfs /bin/sh -euxc '
             apt-get update
-            apt-get install -y --no-install-recommends gcc libc6-dev
+            apt-get install -y --no-install-recommends gcc libc6-dev binutils file
             cat > /tmp/hello.c <<EOF
           #include <stdio.h>
           int main(void){ puts("hello from armhf-qemu"); return 0; }
           EOF
             gcc -O2 -o /tmp/hello /tmp/hello.c
             file /tmp/hello
+            readelf -h /tmp/hello | grep -E "Class|Machine"
             /tmp/hello
           '
 
@@ -141,7 +143,11 @@ jobs:
           set -uxo pipefail
           urls=(
             "https://snapshot.raspbian.org/"
+            "https://snapshot.raspbian.org/archive/"
+            "https://snapshot.raspbian.org/archive/raspbian/"
             "https://snapshot.raspbian.org/archive/raspbian/20250222T000000Z/"
+            "https://snapshot.raspbian.org/archive/raspbian/20250222/"
+            "https://snapshot.raspbian.org/mr/package/raspbian-archive-keyring/"
             "http://archive.raspbian.org/raspbian/dists/bookworm/Release"
             "https://archive.raspberrypi.org/debian/dists/bookworm/Release"
           )
@@ -150,3 +156,8 @@ jobs:
             curl -sS -o /dev/null -D - --max-time 15 "$u" || echo "FAIL $u"
             echo
           done
+          # If snapshot.raspbian.org has a browsable archive root, fetch it
+          # and list recent dates to figure out the actual URL structure.
+          echo "--- GET snapshot.raspbian.org/archive/raspbian/ (body) ---"
+          curl -sS --max-time 15 "https://snapshot.raspbian.org/archive/raspbian/" 2>&1 \
+            | sed -n '1,40p' || true
