@@ -1,0 +1,380 @@
+name: Phase 3.2 toolchain probe (+rpi1 gcc-12 source rebuild)
+
+# One-off probe: rebuild gcc-12 from the preserved +rpi1 source
+# packages on archive.raspbian.org, install the resulting .debs
+# in the chroot, build SBFspot with the pinned toolchain, compare
+# against upstream V3.9.12.
+#
+# Binary debs at 12.2.0-14+rpi1 have been flushed from the Raspbian
+# pool (only +rpi1+deb12u1 remains). The source set is still there:
+#   pool/main/g/gcc-12/gcc-12_12.2.0-14+rpi1.dsc
+#   pool/main/g/gcc-12/gcc-12_12.2.0-14+rpi1.debian.tar.xz
+#   pool/main/g/gcc-12/gcc-12_12.2.0.orig.tar.gz
+#
+# Expected wall-clock: 1.5-3h (gcc bootstrap on 4-core Ampere V1
+# native armhf, C+C++ only via DEB_BUILD_PROFILES). Hence the 360m
+# timeout vs the 60m default.
+#
+# Frozen behind .toolchain-probe-trigger.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.toolchain-probe-trigger
+
+jobs:
+  toolchain-probe:
+    name: Rebuild +rpi1 gcc-12, build SBFspot, diffoscope
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+      ASSET_NAME: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+      ASSET_SHA256: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+      RASPBIAN_MIRROR: http://archive.raspbian.org/raspbian
+      RASPBIAN_SUITE: bookworm
+      # The three source files we need. GCC_VER_RPI1 is the target
+      # version; UPSTREAM_GCC_VER is the shared upstream-GCC tarball.
+      GCC_VER_RPI1: 12.2.0-14+rpi1
+      UPSTREAM_GCC_VER: 12.2.0
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap diffoscope xxd binutils file curl jq \
+            dos2unix
+
+      - name: Fetch Raspbian archive keyring
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+
+      - name: Debootstrap Raspbian bookworm armhf (live archive)
+        run: |
+          set -euxo pipefail
+          sudo debootstrap \
+            --arch=armhf \
+            --variant=minbase \
+            --keyring=$PWD/keyring/raspbian.gpg \
+            --include=ca-certificates \
+            "${RASPBIAN_SUITE}" \
+            rootfs \
+            "${RASPBIAN_MIRROR}"
+          file rootfs/bin/ls
+
+      - name: Enable deb-src + install gcc-12 build deps in chroot
+        run: |
+          set -euxo pipefail
+          # Live archive sources with deb-src enabled so apt can pull
+          # build-deps for gcc-12. Main + contrib + non-free are the
+          # default bookworm components on Raspbian.
+          sudo tee rootfs/etc/apt/sources.list > /dev/null <<EOF
+          deb     ${RASPBIAN_MIRROR} ${RASPBIAN_SUITE} main contrib non-free rpi
+          deb-src ${RASPBIAN_MIRROR} ${RASPBIAN_SUITE} main contrib non-free rpi
+          EOF
+          sudo chroot rootfs /bin/sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            # Build-deps for gcc-12. We pass --no-install-recommends
+            # to keep the chroot lean; anything truly required is in
+            # Build-Depends.
+            apt-get build-dep -y --no-install-recommends gcc-12
+            # Tools the dpkg-buildpackage invocation itself needs.
+            apt-get install -y --no-install-recommends \
+              build-essential devscripts fakeroot dpkg-dev
+            gcc --version
+            df -h /
+          '
+
+      - name: Fetch +rpi1 gcc-12 source set from pool
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/build
+          cd rootfs/build
+          POOL="${RASPBIAN_MIRROR}/pool/main/g/gcc-12"
+          for f in \
+              "gcc-12_${GCC_VER_RPI1}.dsc" \
+              "gcc-12_${GCC_VER_RPI1}.debian.tar.xz" \
+              "gcc-12_${UPSTREAM_GCC_VER}.orig.tar.gz"; do
+            sudo curl -sSL -o "$f" "$POOL/$f"
+          done
+          ls -la
+          # Record sha256s for provenance.
+          sudo sha256sum *.dsc *.tar.* | sudo tee ../../src-sha256.txt
+          cat ../../src-sha256.txt
+
+      - name: Unpack source in chroot
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /build
+            # --no-check: skip sig verify; TLS/sha256 from pool is our
+            # provenance. The Raspbian keyring doesn't carry the
+            # Debian GCC maintainer key that signed the .dsc.
+            dpkg-source --no-check -x gcc-12_${GCC_VER_RPI1}.dsc
+            ls
+            cd gcc-12-${UPSTREAM_GCC_VER}
+            head -3 debian/changelog
+          "
+
+      - name: Build gcc-12 (binary only, C+C++ only)
+        run: |
+          set -euxo pipefail
+          # DEB_BUILD_PROFILES disables Ada / D / Fortran / Go /
+          # Modula-2 / Objective-C / Obj-C++ language frontends via
+          # the standard debian/rules.defs profile hooks. Cuts the
+          # build to ~C+C+ which is all SBFspot needs.
+          #
+          # DEB_BUILD_OPTIONS:
+          #   nocheck  — skip the gcc testsuite (hours of tests)
+          #   nodoc    — skip docbook/PDF output
+          #   parallel — dpkg-buildpackage parallelism
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /build/gcc-12-${UPSTREAM_GCC_VER}
+            export DEB_BUILD_OPTIONS='nocheck nodoc parallel=\$(nproc)'
+            export DEB_BUILD_PROFILES='nolang=ada nolang=d nolang=fortran nolang=go nolang=m2 nolang=objc nolang=obj-c++'
+            # -b: binary only (no source archive). --no-sign: no gpg.
+            # -uc -us: unsigned changes/source redundant with --no-sign
+            # but kept for older dpkg-dev compatibility.
+            dpkg-buildpackage -b -uc -us 2>&1 | tee /build/build.log | tail -300
+          "
+
+      - name: Collect built .debs + libstdc++.a fingerprint
+        run: |
+          set -euxo pipefail
+          mkdir -p out/toolchain-debs
+          # dpkg-buildpackage drops produced .debs one level above
+          # the source tree, inside /build.
+          sudo cp rootfs/build/*.deb out/toolchain-debs/
+          ls -la out/toolchain-debs/
+          (cd out/toolchain-debs && sha256sum *.deb) > out/toolchain-debs.sha256
+          # Extract and hash libstdc++.a — the single static lib that
+          # dominates the 110 KB upstream-vs-ours SBFspot drift.
+          mkdir -p out/libstdcxx-extract
+          LIBDEV=$(ls out/toolchain-debs/libstdc++-12-dev_*.deb | head -1)
+          echo "Extracting: $LIBDEV"
+          (cd out/libstdcxx-extract && dpkg-deb -x "../../$LIBDEV" .)
+          find out/libstdcxx-extract -name 'libstdc++.a' -exec sha256sum {} \;
+
+      - name: Install freshly-built toolchain debs into chroot
+        run: |
+          set -euxo pipefail
+          # Replace the live +deb12u1 toolchain with our rebuilt
+          # +rpi1 toolchain. --force-downgrade because apt considers
+          # +rpi1 < +rpi1+deb12u1.
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /build
+            # Install every deb we built; dpkg resolves internal deps.
+            dpkg --force-downgrade -i *.deb || true
+            apt-get -f install -y
+            # Hold them so future apt-get doesn't pull +deb12u1 back.
+            apt-mark hold gcc-12 g++-12 cpp-12 gcc-12-base libgcc-s1 \
+                          libgcc-12-dev libstdc++-12-dev libstdc++6 \
+                          libgomp1 libatomic1 libubsan1 libasan8 \
+                          libcc1-0 2>/dev/null || true
+            g++ --version
+            # Confirm the .comment string we expect
+            echo '#include <iostream>' > /tmp/t.cpp
+            echo 'int main(){return 0;}' >> /tmp/t.cpp
+            g++ -O2 /tmp/t.cpp -o /tmp/t
+            readelf -p .comment /tmp/t || true
+          "
+
+      - name: Record rootfs package manifest (post-toolchain-pin)
+        run: |
+          set -euo pipefail
+          sudo chroot rootfs /bin/sh -c \
+            'dpkg-query -W -f="${Package}\t${Version}\t${Architecture}\n"' \
+            | sort > out/rootfs-packages.txt
+          wc -l out/rootfs-packages.txt
+          grep -E '^(gcc-12|g\+\+-12|libstdc\+\+|libgcc)' out/rootfs-packages.txt || true
+
+      - name: Check out upstream V3.9.12
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.TAG }}
+          path: upstream
+
+      - name: Stage source tree inside rootfs
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a upstream/SBFspot             rootfs/src/
+          sudo cp -a upstream/SBFspotUploadDaemon rootfs/src/
+          sudo cp -a upstream/SBFspotUploadCommon rootfs/src/
+
+      - name: Install SBFspot build deps in chroot
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get install -y --no-install-recommends \
+              make \
+              libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              libsqlite3-dev \
+              libcurl4-openssl-dev \
+              binutils file
+            g++ --version
+          '
+
+      - name: Build SBFspot + SBFspotUploadDaemon with pinned toolchain
+        run: |
+          set -euxo pipefail
+          EXTRA_LDFLAGS='-static-libstdc++ -Wl,--build-id=none'
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make sqlite LDFLAGS='-s ${EXTRA_LDFLAGS}'
+            readelf -p .comment sqlite/bin/SBFspot || true
+
+            cd /src/SBFspotUploadDaemon
+            make sqlite LDFLAGS='-s ${EXTRA_LDFLAGS}'
+            readelf -p .comment sqlite/bin/SBFspotUploadDaemon || true
+          "
+
+      - name: Stage tarball contents (12 entries, 0777, pinned mtimes)
+        run: |
+          set -euxo pipefail
+          mkdir -p staging
+          sudo cp rootfs/src/SBFspot/sqlite/bin/SBFspot staging/
+          sudo cp rootfs/src/SBFspotUploadDaemon/sqlite/bin/SBFspotUploadDaemon staging/
+          cp upstream/SBFspot/CreateSQLiteDB.sql     staging/
+          cp upstream/SBFspot/date_time_zonespec.csv staging/
+          cp upstream/SBFspot/SBFspot.cfg            staging/SBFspot.default.cfg
+          cp upstream/SBFspot/TagListDE-DE.txt       staging/
+          cp upstream/SBFspot/TagListEN-US.txt       staging/
+          cp upstream/SBFspot/TagListES-ES.txt       staging/
+          cp upstream/SBFspot/TagListFR-FR.txt       staging/
+          cp upstream/SBFspot/TagListIT-IT.txt       staging/
+          cp upstream/SBFspot/TagListNL-NL.txt       staging/
+          cp upstream/SBFspotUploadDaemon/SBFspotUpload.default.cfg staging/
+          sudo chown $USER:$USER staging/*
+          chmod 0777 staging/*
+          for f in \
+              staging/CreateSQLiteDB.sql \
+              staging/SBFspotUpload.default.cfg \
+              staging/TagListDE-DE.txt \
+              staging/TagListEN-US.txt \
+              staging/TagListES-ES.txt \
+              staging/TagListFR-FR.txt \
+              staging/TagListIT-IT.txt \
+              staging/TagListNL-NL.txt; do
+            unix2dos -q "$f"
+          done
+          touch -d '2024-02-13 13:36:02 UTC' staging/CreateSQLiteDB.sql
+          touch -d '2021-01-17 18:43:04 UTC' staging/date_time_zonespec.csv
+          touch -d '2024-02-13 13:36:03 UTC' staging/SBFspot.default.cfg
+          touch -d '2024-04-29 08:52:56 UTC' staging/SBFspotUpload.default.cfg
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListDE-DE.txt
+          touch -d '2024-06-15 17:28:09 UTC' staging/TagListEN-US.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListES-ES.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListFR-FR.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListIT-IT.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListNL-NL.txt
+
+      - name: Assemble tarball (pinned member order)
+        run: |
+          set -euxo pipefail
+          cat > staging/.members <<'EOF'
+          CreateSQLiteDB.sql
+          date_time_zonespec.csv
+          SBFspot
+          SBFspot.default.cfg
+          SBFspotUpload.default.cfg
+          SBFspotUploadDaemon
+          TagListDE-DE.txt
+          TagListEN-US.txt
+          TagListES-ES.txt
+          TagListFR-FR.txt
+          TagListIT-IT.txt
+          TagListNL-NL.txt
+          EOF
+          ( cd staging && \
+            tar --owner=0 --group=0 --numeric-owner \
+                --format=ustar \
+                -T .members \
+                -cf ../sbfspot-sqlite-arm-linux-bookworm.tar \
+          )
+          gzip -n --fast sbfspot-sqlite-arm-linux-bookworm.tar
+          sha256sum sbfspot-sqlite-arm-linux-bookworm.tar.gz
+
+      - name: Download upstream asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          url=$(curl -sSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
+            | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .browser_download_url')
+          curl -sSL -o upstream.tar.gz "$url"
+          echo "${ASSET_SHA256}  upstream.tar.gz" | sha256sum -c -
+
+      - name: diffoscope + normalised-ELF compare
+        run: |
+          set -uxo pipefail
+          mkdir -p out/ours out/upstream
+          : > out/diffoscope.txt
+          : > out/diffoscope.html
+          diffoscope \
+            --html out/diffoscope.html \
+            --text out/diffoscope.txt \
+            --max-report-size 100000000 \
+            upstream.tar.gz \
+            sbfspot-sqlite-arm-linux-bookworm.tar.gz \
+            || true
+          echo "=== diffoscope.txt size ==="
+          wc -l out/diffoscope.txt
+
+          tar -xzf upstream.tar.gz -C out/upstream
+          tar -xzf sbfspot-sqlite-arm-linux-bookworm.tar.gz -C out/ours
+          for bin in SBFspot SBFspotUploadDaemon; do
+            for side in upstream ours; do
+              cp "out/${side}/${bin}" "out/${side}/${bin}.norm"
+              strip --strip-all "out/${side}/${bin}.norm" || true
+              objcopy \
+                --remove-section=.comment \
+                --remove-section=.note.gnu.build-id \
+                "out/${side}/${bin}.norm" 2>/dev/null || true
+            done
+            size_up=$(stat -c%s "out/upstream/${bin}.norm")
+            size_ours=$(stat -c%s "out/ours/${bin}.norm")
+            sha_up=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+            sha_ours=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+            printf '%s upstream: size=%s sha256=%s\n' "$bin" "$size_up"  "$sha_up"
+            printf '%s ours:     size=%s sha256=%s\n' "$bin" "$size_ours" "$sha_ours"
+            if [ "$sha_up" = "$sha_ours" ]; then
+              echo "MATCH: ${bin}"
+            else
+              echo "DIFF: ${bin}"
+              diffoscope \
+                --html "out/diffoscope-${bin}.html" \
+                --text "out/diffoscope-${bin}.txt" \
+                --max-report-size 100000000 \
+                "out/upstream/${bin}.norm" \
+                "out/ours/${bin}.norm" || true
+              wc -l "out/diffoscope-${bin}.txt" || true
+            fi
+          done
+
+      - name: Upload probe artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolchain-probe-rpi1
+          path: |
+            sbfspot-sqlite-arm-linux-bookworm.tar.gz
+            upstream.tar.gz
+            out/
+            src-sha256.txt
+          retention-days: 90
