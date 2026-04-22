@@ -66,8 +66,11 @@ jobs:
             # Upstream NEEDED lacks libmariadbclient.so (static-linked).
             # libmariadbclient.a has transitive deps on dl/z/ssl/crypto
             # that upstream resolves dynamically — match via -Bdynamic -ldl ...
-            sbfspot_static: '-Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
-            daemon_static: '-Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            # -lpthread explicitly first so NEEDED ordering matches upstream
+            # (upstream has libpthread ahead of libdl/z/ssl/crypto; without
+            # this, makefile's later -lpthread puts it last in .dynstr/.dynsym).
+            sbfspot_static: '-lpthread -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            daemon_static: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
 
           - id: sqlite-arm-buster
             codename: buster
@@ -85,14 +88,16 @@ jobs:
             # buster libcurl links gnutls, not openssl (upstream daemon NEEDED shows libgnutls.so.30)
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
-            # On buster, boost_date_time/boost_system also need to be
-            # static-linked. Upstream NEEDED on all 15 tarballs has no
-            # libboost_* entries; bullseye/bookworm hide this via
-            # `ld --as-needed` default, but buster (pre --as-needed)
-            # exposes it. Upstream SBFspot NEEDED on buster also carries
-            # libdl.so.2 — add -ldl too.
-            sbfspot_static: '-Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -Wl,-Bdynamic -ldl'
-            daemon_static: ''
+            # On buster, the makefile's trailing '-Wl,-Bdynamic
+            # -lbluetooth -lboost_date_time -lboost_system' adds those
+            # to NEEDED even when our LDFLAGS already static-linked
+            # them (buster pre-dates --as-needed-as-default). Force
+            # --as-needed so unreferenced dynamic entries get stripped
+            # from NEEDED the same way bullseye/bookworm do implicitly.
+            # Upstream SBFspot NEEDED on buster also carries libdl.so.2
+            # — add -ldl.
+            sbfspot_static: '-Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -Wl,-Bdynamic -ldl'
+            daemon_static: '-Wl,--as-needed'
 
           - id: sqlite-arm64-bullseye
             codename: bullseye
