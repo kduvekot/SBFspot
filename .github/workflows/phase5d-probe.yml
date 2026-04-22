@@ -23,11 +23,11 @@ jobs:
     env:
       SYSGCC_URL: https://sysprogs.com/getfile/2275/raspberry-gcc12.2.0-r2.exe
     steps:
-      - name: Install Wine
+      - name: Install tools
         run: |
-          sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wine wine32:i386 xvfb cabextract
+          sudo apt-get install -y --no-install-recommends \
+            binwalk p7zip-full file curl xz-utils
 
       - name: Download SysGCC installer
         run: |
@@ -37,57 +37,61 @@ jobs:
           file sysgcc.exe
           sha256sum sysgcc.exe
 
-      - name: Silent-install SysGCC under Wine
+      - name: Scan with binwalk + extract embedded archives
         run: |
           set -uxo pipefail
-          export WINEPREFIX=$HOME/.wine-sysgcc
-          export WINEDEBUG=-all
-          # Pre-create prefix (non-interactive)
-          wineboot --init || true
-          sleep 2
-          # Sysprogs installers support /S silent flag (NSIS convention) or /SILENT;
-          # try both. Also try /D= to redirect install dir.
-          mkdir -p ~/sysgcc-install
-          WIN_INSTALL_DIR=$(winepath -w ~/sysgcc-install 2>/dev/null || echo "C:\\SysGCC\\raspberry")
-          echo "Install dir: $WIN_INSTALL_DIR"
-          xvfb-run -a wine sysgcc.exe /S "/D=${WIN_INSTALL_DIR}" &
-          WINE_PID=$!
-          # Wait up to 15 min for installer to finish. Poll for the target file.
-          for i in $(seq 1 180); do
-            if find ~/sysgcc-install $WINEPREFIX/drive_c -name 'libstdc++.a' 2>/dev/null | grep -q .; then
-              echo "libstdc++.a appeared at iteration $i"
-              break
-            fi
-            sleep 5
-          done
-          # Give installer a bit more time then kill if still running
-          sleep 10
-          kill $WINE_PID 2>/dev/null || true
-          wineserver -k 2>/dev/null || true
+          # Step 1: signature scan. Report all embedded streams.
+          binwalk sysgcc.exe 2>&1 | head -40 | tee binwalk-signatures.txt
+          echo
+          # Step 2: extract recursively. binwalk -e extracts known formats
+          # (zip, 7z, lzma, cab, tar.gz, etc.) at each offset it recognises.
+          binwalk -Me sysgcc.exe 2>&1 | tail -30 || true
+          # Result dir: _sysgcc.exe.extracted/
+          echo "--- extracted dir tree ---"
+          find _sysgcc.exe.extracted -maxdepth 3 -type d 2>/dev/null | head -30
+          echo "--- search for libstdc++.a in the extract tree ---"
+          find _sysgcc.exe.extracted -name 'libstdc++.a' 2>/dev/null
+          echo "--- first MBs of any large extracted archives ---"
+          find _sysgcc.exe.extracted -size +1M -type f 2>/dev/null | head -20
 
-      - name: Locate + collect libstdc++.a
+      - name: Collect libstdc++.a (best effort)
         run: |
           set -uxo pipefail
-          export WINEPREFIX=$HOME/.wine-sysgcc
-          echo "--- search all paths ---"
-          find ~/sysgcc-install "$WINEPREFIX/drive_c" -name 'libstdc++.a' 2>/dev/null | while read f; do
-            s=$(stat -c%s "$f"); sha=$(sha256sum "$f" | awk '{print $1}')
-            echo "$f  size=$s sha=$sha"
-          done
-          LIBA=$(find ~/sysgcc-install "$WINEPREFIX/drive_c" -name 'libstdc++.a' 2>/dev/null | head -1)
+          mkdir -p out
+          # Primary: from binwalk extract
+          LIBA=$(find _sysgcc.exe.extracted -name 'libstdc++.a' 2>/dev/null | head -1)
           if [ -z "$LIBA" ]; then
-            echo "ERROR: libstdc++.a not found"
-            echo "--- directory listing for debugging ---"
-            ls -la ~/sysgcc-install/ 2>/dev/null || echo "no sysgcc-install"
-            ls -la $WINEPREFIX/drive_c/ 2>/dev/null || echo "no drive_c"
-            find $WINEPREFIX/drive_c -maxdepth 4 -type d 2>/dev/null | head -20
+            # Secondary: search for the ar archive magic signature in the raw installer.
+            # libstdc++.a starts with '!<arch>\n' (0x21 3C 61 72 63 68 3E 0A).
+            echo "=== scanning raw installer for ar-archive magic ==="
+            # grep offsets where magic appears (hex 213c617263683e0a)
+            grep -abo '!<arch>' sysgcc.exe | head -20 || true
+            OFFSETS=$(grep -abo '!<arch>' sysgcc.exe | awk -F: '{print $1}')
+            for OFF in $OFFSETS; do
+              # extract 200 MB max from each hit; later parse to find true .a
+              dd if=sysgcc.exe of="candidate-$OFF.a" bs=1 skip=$OFF count=200000000 2>/dev/null
+              # Validate with ar t; if it parses, keep the first few hundred members for size
+              if ar t "candidate-$OFF.a" 2>/dev/null | head -3 | grep -q '.o$'; then
+                N=$(ar t "candidate-$OFF.a" 2>/dev/null | wc -l)
+                echo "candidate offset=$OFF: $N members"
+                # Heuristic: libstdc++.a has 300+ .o members
+                if [ "$N" -gt 100 ]; then
+                  # Truncate to exact archive length: find last member's file offset
+                  LIBA="candidate-$OFF.a"
+                  break
+                fi
+              fi
+            done
+          fi
+          if [ -z "$LIBA" ] || [ ! -f "$LIBA" ]; then
+            echo "ERROR: no libstdc++.a recovered"
             exit 1
           fi
-          mkdir -p out
           cp "$LIBA" out/sysgcc_libstdcxx.a
-          # Also try the bundled cross-g++ for its .comment introspection if possible
-          find ~/sysgcc-install "$WINEPREFIX/drive_c" -name 'arm-linux-gnueabihf-g++*' 2>/dev/null | head -3
-          echo "OK; uploading libstdc++.a"
+          ls -la out/sysgcc_libstdcxx.a
+          file out/sysgcc_libstdcxx.a
+          sha256sum out/sysgcc_libstdcxx.a
+          ar t out/sysgcc_libstdcxx.a 2>/dev/null | wc -l
 
       - name: Upload libstdc++.a artefact
         uses: actions/upload-artifact@v4
