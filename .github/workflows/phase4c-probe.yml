@@ -147,13 +147,15 @@ jobs:
             export DEB_BUILD_OPTIONS='nocheck nodoc parallel=\$(nproc)'
             export DEB_BUILD_PROFILES='nolang=ada nolang=d nolang=fortran nolang=go nolang=m2 nolang=objc nolang=obj-c++'
             if [ \"$USE_ENV\" = 'true' ]; then
-              # Phase 4c probe 2: add -D_GLIBCXX_ASSERTIONS alongside
-              # -fasynchronous-unwind-tables. Probe 1 proved the flag
-              # plumbing works but async alone closes only ~4 KB of the
-              # 16 KB residual; assertions should grow libstdc++'s LSDA
-              # tables (the 11.5 KB of .ARM.extab we're still missing).
-              export CFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables -D_GLIBCXX_ASSERTIONS'
-              export CXXFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables -D_GLIBCXX_ASSERTIONS'
+              # Phase 4c probe 3: try -fnon-call-exceptions alongside
+              # async unwind. Probe 2 data: _GLIBCXX_ASSERTIONS grew
+              # .text + .rodata heavily but not .ARM.extab. Upstream
+              # has big .ARM.extab without big .text growth. That's
+              # the signature of -fnon-call-exceptions: treats all
+              # instructions as potentially-throwing, inflating LSDA
+              # call-site tables without changing code.
+              export CFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables -fnon-call-exceptions'
+              export CXXFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables -fnon-call-exceptions'
               echo 'Set CXXFLAGS_FOR_TARGET='\$CXXFLAGS_FOR_TARGET
             fi
             dpkg-buildpackage -b -uc -us 2>&1 | tee /build/build.log | tail -500
