@@ -38,15 +38,12 @@ jobs:
       fail-fast: false
       matrix:
         cell:
+          # Env-only proven to propagate (25,148 occurrences of the flag
+          # in the gcc build log from run 24768687959). Drop other cells
+          # unless this one fails to byte-match.
           - id: env-only
             use_env: 'true'
             use_sed: 'false'
-          - id: sed-only
-            use_env: 'false'
-            use_sed: 'true'
-          - id: env-and-sed
-            use_env: 'true'
-            use_sed: 'true'
 
     env:
       TAG: V3.9.12
@@ -165,18 +162,24 @@ jobs:
           echo "=== example libstdc++ compile command ==="
           sudo grep -m1 'libstdc++-v3.*-o ' rootfs/build/build.log || true
 
-      - name: Install rebuilt toolchain + collect libstdc++.a sha
+      - name: Collect built debs + libstdc++.a sha (before install)
         run: |
           set -euxo pipefail
-          sudo cp rootfs/build/*.deb /tmp/ 2>/dev/null || true
-          ls /tmp/*.deb | head -5
-          # Extract libstdc++.a from the rebuilt package
-          mkdir -p /tmp/extract && cd /tmp/extract
-          LIBDEV=$(ls /tmp/libstdc++-12-dev_*.deb | head -1)
-          dpkg-deb -x "$LIBDEV" .
-          find . -name 'libstdc++.a' -exec sha256sum {} +
-          # Install into chroot
-          sudo chroot rootfs /bin/sh -euxc "
+          mkdir -p out/toolchain-debs
+          sudo cp rootfs/build/*.deb out/toolchain-debs/ 2>/dev/null || true
+          ls out/toolchain-debs/ | head
+          # Extract libstdc++.a for sha record + fingerprint
+          mkdir -p out/libstdcxx-extract
+          LIBDEV=$(ls out/toolchain-debs/libstdc++-12-dev_*.deb | head -1)
+          (cd out/libstdcxx-extract && dpkg-deb -x "../../$LIBDEV" .)
+          find out/libstdcxx-extract -name 'libstdc++.a' -exec sha256sum {} +
+
+      - name: Install rebuilt toolchain into chroot
+        run: |
+          set -euxo pipefail
+          # Use absolute path (GITHUB_WORKSPACE); previous pwd=/tmp/extract
+          # broke the relative chroot invocation.
+          sudo chroot "$GITHUB_WORKSPACE/rootfs" /bin/sh -euxc "
             cd /build
             dpkg --force-downgrade -i *.deb || true
             apt-get -f install -y
