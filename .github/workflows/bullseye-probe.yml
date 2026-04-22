@@ -99,6 +99,30 @@ jobs:
             'dpkg-query -W -f="${Package}\t${Version}\t${Architecture}\n"' \
             | sort > out/rootfs-packages.txt
 
+      - name: Install compiler wrapper with -fmacro-prefix-map
+        run: |
+          set -euxo pipefail
+          # Upstream cross-compiles from Windows; boost header
+          # __FILE__ expansions land with the Windows sysroot prefix
+          # "d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include".
+          # -fmacro-prefix-map rewrites our /usr/include prefix at
+          # preprocess time to match (standard reproducible-builds
+          # tool; not forgery, the macro expansion is the only thing
+          # that differs).
+          #
+          # We use a compiler wrapper rather than `make CFLAGS=...`
+          # because the SBFspot makefile appends -DUSE_SQLITE etc.
+          # onto CFLAGS after the base assignment; CLI-overriding
+          # CFLAGS wholesale would drop those variant-specific
+          # defines. Single-quoted heredoc preserves backslashes
+          # verbatim into the wrapper script file.
+          sudo tee rootfs/usr/local/bin/g++ > /dev/null <<'WRAP'
+          #!/bin/sh
+          exec /usr/bin/g++ '-fmacro-prefix-map=/usr/include=d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include' "$@"
+          WRAP
+          sudo chmod +x rootfs/usr/local/bin/g++
+          sudo chroot rootfs /bin/sh -c '/usr/local/bin/g++ --version | head -1; which g++'
+
       - name: Build SBFspot + SBFspotUploadDaemon (sqlite) inside chroot
         run: |
           set -euxo pipefail
@@ -108,21 +132,11 @@ jobs:
           # Keep: -s (strip at link), static bluetooth (SBFspot only).
           COMMON_LDFLAGS='-s'
           SBFSPOT_LDFLAGS="${COMMON_LDFLAGS} -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic"
-          # Upstream cross-compiles from Windows; boost headers'
-          # __FILE__ expansions land with the Windows sysroot prefix
-          # "d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include".
-          # -fmacro-prefix-map rewrites our /usr/include prefix to the
-          # upstream one at preprocess time — standard reproducible-
-          # builds tool for this exact case (not forgery; the macro
-          # expansion is the only thing that differs).
-          MAP='d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include'
-          # Exact CFLAGS from SBFspot/makefile, plus the map. We pass
-          # the whole CFLAGS because make command-line override replaces
-          # the makefile assignment wholesale.
-          SBFSPOT_CFLAGS="-c -Wall -O2 -Wno-unused-local-typedefs -Wno-psabi -fmacro-prefix-map=/usr/include=${MAP}"
+          # /usr/local/bin comes first on PATH in the chroot, so `g++`
+          # resolves to our wrapper. No CFLAGS override needed.
           sudo chroot rootfs /bin/sh -euxc "
             cd /src/SBFspot
-            make sqlite CFLAGS='${SBFSPOT_CFLAGS}' LDFLAGS='${SBFSPOT_LDFLAGS}'
+            make sqlite LDFLAGS='${SBFSPOT_LDFLAGS}'
             readelf -d sqlite/bin/SBFspot | grep NEEDED || true
 
             cd /src/SBFspotUploadDaemon
