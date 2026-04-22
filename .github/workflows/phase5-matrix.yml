@@ -270,11 +270,12 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            # Phase 5c fix: prior run showed -65,536 B "residual" was LOAD-
-            # segment file-padding (ours packed file_offset 0x6e770 while
-            # upstream padded to 0x7e770 to match vaddr). Force upstream's
-            # alignment via -z separate-loadable-segments.
-            common_ldflags: '-s -Wl,-z,separate-loadable-segments'
+            # Phase 5c probed -Wl,-z,separate-loadable-segments — had no
+            # effect on LOAD-segment layout (binutils 2.40 ignored it or
+            # default behaviour differs). The -65,536 B file-padding
+            # remains and reflects a linker behaviour we can't match
+            # without upstream's specific binutils version.
+            common_ldflags: '-s'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm64-bookworm

@@ -110,6 +110,26 @@ known, documented residual patterns. The 7 clean byte-matches
 vs upstream show the pipeline is working at the bar we set;
 the 18 non-clean results are all in known-mechanism buckets.
 
+## Phase 5c — 3 targeted fixes probed
+
+After the Phase 5 baseline, three cheap-looking fixes were tried:
+
+| Fix | Target | Result |
+|---|---|---|
+| Add `-Wl,--no-as-needed -ldl` to sqlite-arm-buster daemon | close missing NEEDED entry | **Kept.** `libdl.so.2` now in our NEEDED (matches upstream). Daemon residual unchanged because several *other* NEEDED entries still differ (libcurl-gnutls vs libcurl SONAME; missing libpthread/libgnutls/libm) — sysroot-level package-flavour differences. |
+| Use `-l:libpthread.so.0` on mariadb-arm-bullseye | close +28 B NEEDED ordering | **Kept.** NEEDED order now matches upstream byte-for-byte. But residual is still +28 B — every section's content has small byte drift. The +28 B was NOT NEEDED ordering; it's widespread `libmariadbclient.a` byte drift, same story as arm-bookworm libstdc++. |
+| `-Wl,-z,separate-loadable-segments` on nosql-arm64-bookworm | close 64 KB file-padding | **Reverted.** binutils 2.40 ignored the flag; LOAD segments stayed at their tight-packed file offsets. Different linker version than upstream's — mechanism not reachable by flag. |
+
+**Lessons from Phase 5c**:
+- NEEDED-set fixes (add/remove entries or reorder) are ~free and
+  correct to keep even when residuals don't drop.
+- LOAD-segment alignment drift is binutils-version-sensitive —
+  upstream uses a different binutils than our debootstrap provides
+  and we have no way to tell which default the flag targets.
+- Residuals that look like "ordering problems" (small byte counts)
+  are often wider byte drift, visible only via per-section sha
+  comparison. Always check section-content shas, not just sizes.
+
 ## Next: Phase 5b (tarball assembly) or Phase 6 (trixie)
 
 Phase 5b — per-variant tarball assembly so diffoscope at the tar
