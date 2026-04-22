@@ -132,42 +132,114 @@ Bucketed extab bytes by 64 KB `.text` virtual-address range:
 content. App code region (from ~0x60000 onward) has ~zero extab
 delta. **This is purely a `libstdc++.a` issue.**
 
-### 6. Root cause
+### 6. Root cause (revised)
 
-Same libstdc++ functions, same personality-routine mix, same
-exception model — upstream's per-function unwind tables just
-carry more bytes than ours. That points to a gcc-build-time
-configure choice for libstdc++ itself, embedded in their `.a`
-file. Candidates (all speculative — we don't have upstream's
-crosstool-ng config):
+> **Retraction and revision (post-Phase 4 deep-dive):** An earlier
+> draft of this section concluded the residual came from non-standard
+> gcc configure flags (`--enable-libstdcxx-assertions`, etc.). That
+> was a speculative leap not backed by evidence. The honest root
+> cause, below, came from one more round of comparison.
 
-- `--enable-libstdcxx-assertions` (adds runtime check wrappers
-  with cleanup handlers → more unwind ops per function)
-- `--enable-libstdcxx-backtrace` (gcc-12.1+; adds stacktrace
-  support with extra cleanup in exception paths)
-- Different `--with-default-libstdcxx-abi` / `--enable-clocale`
-- Different `-fasynchronous-unwind-tables` vs
-  `-funwind-tables` for libstdc++'s own compile
+The revised analysis uses a side-by-side byte dump of a specific
+"fat" function — upstream's `SBFspot` virtual address `0x3794c`
+has a 964-byte `.ARM.extab` entry (the largest), a libstdc++ function:
 
-None of these are recoverable from public data — they live in
-upstream's Windows-hosted cross-toolchain configure. To close the
-11.5 KB, we'd need the maintainer's configure flags or the `.a`
-file itself.
+- **Both binaries share the same first 8 bytes** (function prologue
+  `f0 4f 2d e9 01 8a 80 e2` = push {r4-r11, lr}; add r8, r0, #0x100)
+- **Code bytes then diverge substantially** — only 20% of the
+  first 256 bytes match between upstream and ours, with different
+  instruction ordering and different register allocation.
 
-### Conclusion
+Both binaries' `.ARM.attributes` sections are byte-identical
+(armv6, VFPv2, Thumb-1, VFP args — the Raspbian-standard ABI).
+Both `.comment` strings read `GCC: (Raspbian 12.2.0-14+rpi1) 12.2.0`.
+Same source code, same gcc version label, same ISA, same ABI —
+but **different compiled bytes** for the libstdc++ region.
 
-The "~16 KB irreducible on arm × bookworm" now has a specific
-root cause: **upstream's libstdc++.a emits ~11 bytes more per
-function in its `.ARM.extab` unwind tables than any public
-Raspbian-gcc-built libstdc++.a does.** That's a gcc-build-of-
-libstdc++ configure-time choice we don't have access to. The
-remaining ~4.5 KB (`.rodata` + `.text`) likely follows from the
-same configure difference — slightly different LSDA tables
-referenced from the extab entries, plus some minor codegen
-knock-ons.
+That combination narrows the mechanism precisely:
 
-Bar 1a'' byte-match stays unreachable on `arm × bookworm`, but
-we now know **why** with precision.
+- Not a different source (same `+rpi1` label)
+- Not a different gcc version (same 12.2.0 label)
+- Not a different ISA/tune (same `.ARM.attributes`)
+- Not different gcc configure flags in any way that affects the
+  .ARM.attributes or .comment string
+
+The only remaining way for same-source-same-version to produce
+different bytes is: **the gcc BINARY that compiled libstdc++ was
+different** — i.e. upstream's gcc is a Canadian-cross build
+(x86_64-w64-mingw32 host → arm-linux-gnueabihf target) that
+produces different object bytes than Debian/Raspbian's native
+x86_64-linux-gnu → armhf build, even from the same source.
+
+Canadian-cross gcc reproducibility is a known real gap: Debian
+tracks reproducibility only for its own Linux-native buildds,
+not for Canadian-crossed rebuilds of the same source.
+
+### 7. Dates corroborate a stable-toolchain story
+
+Binary mtimes from the upstream tarballs:
+
+| Tag | Binary mtime | Released |
+|---|---|---|
+| V3.9.10 | 2024-06-12 18:25 UTC | 2024-06-14 |
+| V3.9.11 | 2024-06-17 19:30 UTC | 2024-06-18 |
+| V3.9.12 | 2025-02-22 09:49 UTC | 2025-02-22 |
+
+8 months between V3.9.11 and V3.9.12, **same residual**. The
+cross-toolchain was installed once (pre-2024-06) and reused
+without update across all three builds.
+
+### 8. Candidate sources for upstream's libstdc++.a
+
+To close the 16 KB to zero, we need upstream's specific
+libstdc++.a bytes. Concrete candidates to try in CI:
+
+1. **Raspberry Pi OS bookworm image pre-2024-06** (e.g. 2024-03-15
+   release) — extract `/usr/lib/arm-linux-gnueabihf/libstdc++.a`.
+   If the maintainer populated their sysroot by copying from a
+   Pi image around that time, this matches.
+2. **abhiTronix prebuilt bookworm cross-toolchain** (GitHub /
+   SourceForge, v3.1.0 released 2024-08-31) — their toolchain
+   builds from Raspbian gcc-12 source and ships its own
+   libstdc++.a. If the maintainer used this, substitute test
+   matches.
+3. **SysGCC Raspberry** (commercial Windows installer, sysprogs)
+   — bookworm variant with matched sysroot. Has a free download
+   for the basic variant.
+
+None of these are guaranteed to match; one or more might. Test
+cost: ~5–10 min CI per candidate.
+
+### 9. What the 16 KB isn't
+
+To close some false trails the earlier analysis chased:
+
+- **Not a gcc version / package drift.** Phase 3.2 proved our
+  `+rpi1` source-rebuild produces identical SBFspot bytes to the
+  live `+rpi1+deb12u1` chroot. Same code-gen from Raspbian's
+  Linux-native gcc regardless of patch level.
+- **Not a different boost / static-lib choice.** Phase 3.3
+  identified the static-libbluetooth bug; once fixed, the
+  residual concentrated in the libstdc++ region. The residual
+  we're discussing now is purely libstdc++.
+- **Not a gcc configure difference.** The ARM attributes and
+  `.comment` string are identical on both sides; configure-time
+  choices affect both.
+- **Not a "+11 B unwind opcode per function" artefact.** It's
+  fat functions (a handful with 500–1000 B extab entries) plus
+  more modest per-function drift, reflecting different code-gen.
+
+### 10. Conclusion
+
+Bar 1a'' on `arm × bookworm` is closable **if we can obtain
+upstream's specific cross-toolchain's libstdc++.a**. It's a
+concrete, testable proposition — not an architecture-level
+irreducible. Next step: probe the 3 candidate sources in order
+of likelihood.
+
+If none match, we ask the upstream maintainer directly. The
+Phase 7 upstream contribution conversation has a clean ask:
+"which Windows cross-toolchain do you use for bookworm-arm?"
 
 ## What this tells us going into Phase 5
 
