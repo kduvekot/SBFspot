@@ -178,6 +178,9 @@ jobs:
       - name: Install build deps in chroot
         run: |
           set -euxo pipefail
+          # Expand matrix-driven lists at outer-bash level so the
+          # inner sh (under set -u) doesn't see unset vars. Empty
+          # strings collapse harmlessly into the apt-get line.
           DB_PKGS='${{ matrix.cell.db_pkgs }}'
           CURL_PKG='${{ matrix.cell.curl_pkg }}'
           sudo chroot rootfs /bin/sh -euxc "
@@ -188,7 +191,7 @@ jobs:
               libbluetooth-dev \
               libboost-date-time-dev libboost-system-dev \
               binutils file \
-              \$DB_PKGS \$CURL_PKG
+              ${DB_PKGS} ${CURL_PKG}
             g++ --version | head -1
           "
 
