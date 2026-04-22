@@ -1,0 +1,242 @@
+name: Phase 4b libstdc++.a candidate probe (RaspiOS image vs ours)
+
+# Tests whether substituting libstdc++.a from a dated Raspberry
+# Pi OS bookworm armhf image into our chroot closes the 16 KB
+# residual on arm x bookworm x sqlite.
+#
+# Rationale (see docs/phase4-baseline.md, "candidate sources"):
+# Upstream's SBFspot V3.9.10 was built 2024-06-12; toolchain has
+# been stable since. If the maintainer populated their cross
+# sysroot by copying from a Raspberry Pi OS image dated pre-June-
+# 2024, that image's libstdc++.a is what's linked into upstream's
+# SBFspot. Substituting it into our chroot SHOULD yield byte-match
+# if the hypothesis holds.
+#
+# Matrix: try three candidate image dates in parallel.
+# Frozen behind .phase4b-probe-trigger.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.phase4b-probe-trigger
+
+jobs:
+  probe:
+    name: "candidate: ${{ matrix.cell.image_date }}"
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        cell:
+          # Most likely: 2024-03-15 is the last bookworm lite armhf
+          # before V3.9.10's 2024-06-12 build.
+          - image_date: '2024-03-15'
+          # Fallbacks: 2023-12-11 (late-2023) and 2023-10-10 (first
+          # bookworm lite).
+          - image_date: '2023-12-11'
+          - image_date: '2023-10-10'
+
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+      ASSET_NAME: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+      ASSET_SHA256: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+      RASPBIAN_MIRROR: http://archive.raspbian.org/raspbian
+      RASPBIAN_SUITE: bookworm
+
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap diffoscope xxd binutils file curl jq \
+            xz-utils kpartx e2fsprogs
+
+      - name: Download + extract RaspiOS image
+        run: |
+          set -euxo pipefail
+          DATE=${{ matrix.cell.image_date }}
+          URL="https://downloads.raspberrypi.com/raspios_lite_armhf/images/raspios_lite_armhf-${DATE}/${DATE}-raspios-bookworm-armhf-lite.img.xz"
+          curl -sSL --fail "$URL" -o raspios.img.xz
+          ls -lh raspios.img.xz
+          xz -d raspios.img.xz
+          ls -lh raspios.img
+          # Look at partition layout
+          /sbin/fdisk -l raspios.img | head -20
+
+      - name: Extract libstdc++.a from image
+        run: |
+          set -euxo pipefail
+          # Find partition 2 start offset (rootfs). RPi OS layout:
+          # p1 = /boot (fat32 ~512MB), p2 = rootfs (ext4, rest).
+          OFFSET_SECTORS=$(/sbin/fdisk -l raspios.img | awk '/raspios\.img2/ {print $2}')
+          OFFSET_BYTES=$((OFFSET_SECTORS * 512))
+          echo "rootfs partition starts at byte $OFFSET_BYTES"
+          # Use debugfs to dump the file without mounting (avoids
+          # needing loop-device privileges).
+          sudo debugfs -R "dump /usr/lib/arm-linux-gnueabihf/libstdc++.a /tmp/candidate_libstdcxx.a" \
+            -o offset=$OFFSET_BYTES raspios.img 2>&1 | tee /tmp/debugfs.log
+          ls -la /tmp/candidate_libstdcxx.a
+          file /tmp/candidate_libstdcxx.a
+          sha256sum /tmp/candidate_libstdcxx.a
+
+      - name: Fetch Raspbian keyring
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+
+      - name: Debootstrap Raspbian bookworm armhf
+        run: |
+          set -euxo pipefail
+          sudo debootstrap \
+            --arch=armhf \
+            --variant=minbase \
+            --keyring=$PWD/keyring/raspbian.gpg \
+            --include=ca-certificates \
+            "${RASPBIAN_SUITE}" \
+            rootfs \
+            "${RASPBIAN_MIRROR}"
+
+      - name: Install build deps in chroot
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              g++ make \
+              libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              libsqlite3-dev \
+              libcurl4-openssl-dev \
+              binutils file
+          '
+
+      - name: Record live libstdc++.a sha for comparison
+        run: |
+          set -euxo pipefail
+          # The .a libstdc++ lives under the gcc install, not the
+          # multiarch lib dir. Capture both if present.
+          for f in \
+              rootfs/usr/lib/gcc/arm-linux-gnueabihf/12/libstdc++.a \
+              rootfs/usr/lib/arm-linux-gnueabihf/libstdc++.a; do
+            if [ -f "$f" ]; then
+              echo "BEFORE:" "$f"
+              sudo sha256sum "$f"
+              sudo stat -c '  size=%s' "$f"
+            fi
+          done
+
+      - name: Substitute candidate libstdc++.a into chroot
+        run: |
+          set -euxo pipefail
+          # Copy the RaspiOS-image-sourced libstdc++.a into both
+          # locations where ld might find it. Override both so
+          # -static-libstdc++ definitely picks our candidate.
+          for f in \
+              rootfs/usr/lib/gcc/arm-linux-gnueabihf/12/libstdc++.a \
+              rootfs/usr/lib/arm-linux-gnueabihf/libstdc++.a; do
+            if [ -f "$f" ]; then
+              sudo cp /tmp/candidate_libstdcxx.a "$f"
+              echo "AFTER:" "$f"
+              sudo sha256sum "$f"
+              sudo stat -c '  size=%s' "$f"
+            fi
+          done
+
+      - name: Check out upstream V3.9.12
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.TAG }}
+          path: upstream
+
+      - name: Stage source tree inside rootfs
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a upstream/SBFspot             rootfs/src/
+          sudo cp -a upstream/SBFspotUploadDaemon rootfs/src/
+          sudo cp -a upstream/SBFspotUploadCommon rootfs/src/
+
+      - name: Install compiler wrapper with bookworm-arm prefix
+        run: |
+          set -euxo pipefail
+          sudo tee rootfs/usr/local/bin/g++ > /dev/null <<'WRAP'
+          #!/bin/sh
+          exec /usr/bin/g++ '-fmacro-prefix-map=/usr/include=d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include' "$@"
+          WRAP
+          sudo chmod +x rootfs/usr/local/bin/g++
+
+      - name: Build SBFspot + SBFspotUploadDaemon (sqlite)
+        run: |
+          set -euxo pipefail
+          COMMON_LDFLAGS='-s -static-libstdc++ -Wl,--build-id=none'
+          SBFSPOT_LDFLAGS="${COMMON_LDFLAGS} -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic"
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make sqlite LDFLAGS='${SBFSPOT_LDFLAGS}'
+            cd /src/SBFspotUploadDaemon
+            make sqlite LDFLAGS='${COMMON_LDFLAGS}'
+          "
+
+      - name: Download upstream V3.9.12 asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          url=$(curl -sSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
+            | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .browser_download_url')
+          curl -sSL -o upstream.tar.gz "$url"
+          echo "${ASSET_SHA256}  upstream.tar.gz" | sha256sum -c -
+          mkdir -p out/upstream
+          tar -xzf upstream.tar.gz -C out/upstream
+
+      - name: Normalised-ELF compare
+        run: |
+          set -uxo pipefail
+          mkdir -p out/ours
+          sudo cp rootfs/src/SBFspot/sqlite/bin/SBFspot out/ours/SBFspot
+          sudo cp rootfs/src/SBFspotUploadDaemon/sqlite/bin/SBFspotUploadDaemon out/ours/SBFspotUploadDaemon
+          sudo chown -R $USER:$USER out/ours
+          for bin in SBFspot SBFspotUploadDaemon; do
+            for side in upstream ours; do
+              cp "out/${side}/${bin}" "out/${side}/${bin}.norm"
+              strip --strip-all "out/${side}/${bin}.norm" || true
+              objcopy \
+                --remove-section=.comment \
+                --remove-section=.note.gnu.build-id \
+                "out/${side}/${bin}.norm" 2>/dev/null || true
+            done
+            s_u=$(stat -c%s "out/upstream/${bin}.norm")
+            s_o=$(stat -c%s "out/ours/${bin}.norm")
+            sha_u=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+            sha_o=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+            if [ "$sha_u" = "$sha_o" ]; then
+              echo "::notice title=${{ matrix.cell.image_date }} ${bin}::MATCH size=${s_u}"
+              printf '%s MATCH  size=%s  sha=%s\n' "$bin" "$s_u" "$sha_u"
+            else
+              echo "::warning title=${{ matrix.cell.image_date }} ${bin}::residual=$((s_o - s_u)) B"
+              printf '%s DIFF  upstream=%s ours=%s delta=%+d\n' "$bin" "$s_u" "$s_o" "$((s_o - s_u))"
+            fi
+          done
+
+      - name: Upload per-cell artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase4b-${{ matrix.cell.image_date }}
+          path: |
+            out/
+          retention-days: 90
+          if-no-files-found: ignore
