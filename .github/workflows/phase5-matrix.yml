@@ -43,7 +43,8 @@ jobs:
             asset_sha: 0d4b32bb02df5cf78b7f78d974a92c4a472dd672bd96f6d396215ea72daf1e0c
             prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
             mirror: raspbian-legacy
-            db_pkgs: 'libsqlite3-dev'
+            # libgnutls28-dev: LDFLAGS forces -lgnutls to keep upstream's NEEDED entry
+            db_pkgs: 'libsqlite3-dev libgnutls28-dev'
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
             common_ldflags: '-s'
@@ -75,7 +76,9 @@ jobs:
             asset_sha: 9c9e47237101497e921d2da28b06106b110c44a0cb274f4efafd00e1d1fa0224
             prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
             mirror: raspbian-legacy
-            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            # libgnutls28-dev + libssl-dev for the -lgnutls/-lssl/-lcrypto
+            # references our LDFLAGS forces to match upstream NEEDED
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat libgnutls28-dev libssl-dev'
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
             common_ldflags: '-s'
