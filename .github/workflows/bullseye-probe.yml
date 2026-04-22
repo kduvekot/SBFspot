@@ -108,9 +108,21 @@ jobs:
           # Keep: -s (strip at link), static bluetooth (SBFspot only).
           COMMON_LDFLAGS='-s'
           SBFSPOT_LDFLAGS="${COMMON_LDFLAGS} -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic"
+          # Upstream cross-compiles from Windows; boost headers'
+          # __FILE__ expansions land with the Windows sysroot prefix
+          # "d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include".
+          # -fmacro-prefix-map rewrites our /usr/include prefix to the
+          # upstream one at preprocess time — standard reproducible-
+          # builds tool for this exact case (not forgery; the macro
+          # expansion is the only thing that differs).
+          MAP='d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include'
+          # Exact CFLAGS from SBFspot/makefile, plus the map. We pass
+          # the whole CFLAGS because make command-line override replaces
+          # the makefile assignment wholesale.
+          SBFSPOT_CFLAGS="-c -Wall -O2 -Wno-unused-local-typedefs -Wno-psabi -fmacro-prefix-map=/usr/include=${MAP}"
           sudo chroot rootfs /bin/sh -euxc "
             cd /src/SBFspot
-            make sqlite LDFLAGS='${SBFSPOT_LDFLAGS}'
+            make sqlite CFLAGS='${SBFSPOT_CFLAGS}' LDFLAGS='${SBFSPOT_LDFLAGS}'
             readelf -d sqlite/bin/SBFspot | grep NEEDED || true
 
             cd /src/SBFspotUploadDaemon
