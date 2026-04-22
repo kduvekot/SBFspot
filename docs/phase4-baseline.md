@@ -229,17 +229,104 @@ To close some false trails the earlier analysis chased:
   fat functions (a handful with 500–1000 B extab entries) plus
   more modest per-function drift, reflecting different code-gen.
 
-### 10. Conclusion
+### 10. Phase 4c follow-up: libstdc++ rebuild probes
 
-Bar 1a'' on `arm × bookworm` is closable **if we can obtain
-upstream's specific cross-toolchain's libstdc++.a**. It's a
-concrete, testable proposition — not an architecture-level
-irreducible. Next step: probe the 3 candidate sources in order
-of likelihood.
+After the section-by-section analysis, three CI probes rebuilt
+gcc-12 at `+rpi1` with progressively targeted libstdc++ compile
+flags, trying to reproduce upstream's specific `.ARM.extab`
+growth. Each probe was ~1h42m (full gcc bootstrap) on
+`ubuntu-24.04-arm`, run via `.github/workflows/phase4c-probe.yml`.
 
-If none match, we ask the upstream maintainer directly. The
-Phase 7 upstream contribution conversation has a clean ask:
-"which Windows cross-toolchain do you use for bookworm-arm?"
+#### Probe 1: `-fasynchronous-unwind-tables` (run `24773172395`)
+
+Hypothesis: upstream's `.ARM.extab` growth comes from async
+unwind tables (unwind records at every instruction, not just
+landing pads).
+
+Result: **partial hit**. Residual went from −16,384 B →
+−12,288 B (4 KB closer). But the section delta showed the
+growth was in `.ARM.exidx` (+3,528 B — 442 new inline unwind
+records for previously-unrecorded functions), **not in
+`.ARM.extab`** (essentially unchanged at +24 B). Async unwind
+adds simple-frame unwind records, not LSDA/cleanup tables.
+
+Conclusion: async is part of the story but doesn't explain the
++11.5 KB extab shape we see.
+
+#### Probe 2: + `-D_GLIBCXX_ASSERTIONS` (run `24777682832`)
+
+Hypothesis: `__glibcxx_assert()` macros wrap library calls with
+runtime throw-on-fail checks, adding try/catch structure → more
+LSDA call-site entries → bigger `.ARM.extab`.
+
+Result: **overshoots +24,596 B** from zero. Section deltas show
+assertions grew `.text` (+21 KB) and `.rodata` (+9.7 KB) but
+`.ARM.extab` only grew +516 B. Assertions add throw code and
+error strings, but the LSDA tables barely change.
+
+Conclusion: `_GLIBCXX_ASSERTIONS` grows the wrong sections.
+Upstream doesn't use it.
+
+#### Probe 3: async + `-fnon-call-exceptions` (run `24782755017`)
+
+Hypothesis: `-fnon-call-exceptions` tells gcc every instruction
+(not just calls) is potentially-throwing → LSDA call-site tables
+must cover every instruction → `.ARM.extab` grows without
+growing code.
+
+Result: **massively overshoots +61,468 B**. Section delta shows
+`.ARM.extab` blew up from 41,692 → 101,572 (+60 KB), 4× more
+than upstream's growth.
+
+Conclusion: mechanism is right shape but flag is too aggressive.
+Upstream's `.ARM.extab` growth is about 1/5 of what
+`-fnon-call-exceptions` produces.
+
+### 11. What the probe data says, and doesn't
+
+**It says:** the residual isn't explainable as a single
+well-known gcc flag. Three plausible candidates tested (async
+unwind, assertions, non-call-exceptions). None land at upstream's
+exact shape (`.ARM.extab` +11.5 KB with `.text`/`.rodata`
+~unchanged). `-fnon-call-exceptions` has the right signature
+(extab-only growth) but is 4× too aggressive — suggesting
+upstream uses something with similar semantics but scoped to a
+subset of code.
+
+**It doesn't say** what the exact recipe is. Candidates we
+couldn't test cheaply:
+- A small subset of libstdc++ source files compiled with
+  `-fnon-call-exceptions` (would require source-level patching)
+- A specific libstdc++ build-time option we haven't identified
+- A patched libstdc++ source tree entirely
+
+### 12. Retracted conclusion
+
+Earlier drafts of this doc proposed the residual was closable
+with "a one-line fix once we identified the right flag." After
+three targeted CI probes (5h of gcc rebuilds), we haven't found
+that one-line fix. The mechanism is characterised (libstdc++'s
+`.ARM.extab` has ~11 B more LSDA per function than ours), but
+the exact gcc configure or CXXFLAGS that produces that shape is
+not a standard, easy-to-find flag.
+
+Realistic closure paths remaining:
+1. **Ask upstream maintainer directly** (in Phase 7 contribution
+   conversation): "For arm × bookworm specifically, what gcc
+   build options do you pass for libstdc++ in your Windows
+   cross-toolchain?"
+2. **Source-patch specific libstdc++ TUs** to emit extra LSDA.
+   High effort, low confidence.
+3. **Accept the residual** as documented Canadian-cross
+   libstdc++ variant.
+
+**Accepted residual (final).** Bar 1a'' on `arm × bookworm`
+settles at −16,384 B (stock) or −12,288 B (with async-unwind —
+partial improvement, not worth complicating release.yml for).
+It's 1.3% of a 1.24 MB binary, unique to this combo among the
+15 upstream variants, and fully characterised as a libstdc++.a
+byte-level difference from a cross-toolchain we can't replicate
+from public data alone.
 
 ## What this tells us going into Phase 5
 
