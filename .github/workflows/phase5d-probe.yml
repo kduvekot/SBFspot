@@ -1,14 +1,10 @@
 name: Phase 5d SysGCC libstdc++.a substitution probe
 
-# Tests the hypothesis that upstream uses SysGCC r2's libstdc++.a.
-# Downloads the SysGCC Raspberry GCC 12.2.0-r2 Windows installer,
-# extracts via innoextract, substitutes its libstdc++.a into our
-# Raspbian bookworm armhf chroot, rebuilds SBFspot, compares to
-# upstream V3.9.12.
-#
-# If upstream genuinely uses SysGCC (per Gemini forensic analysis),
-# libstdc++.a bytes should match and the 16 KB arm-bookworm
-# residual collapses to 0.
+# Two-job pipeline:
+#  extract: ubuntu-latest (x86_64) — runs the SysGCC installer
+#           silently under Wine, pulls out libstdc++.a
+#  build:   ubuntu-24.04-arm — uses that libstdc++.a in our
+#           bookworm-armhf build, diffs vs upstream V3.9.12.
 #
 # Frozen behind .phase5d-probe-trigger.
 
@@ -21,25 +17,17 @@ on:
       - .github/workflows/.phase5d-probe-trigger
 
 jobs:
-  probe:
-    runs-on: ubuntu-24.04-arm
+  extract:
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      TAG: V3.9.12
-      UPSTREAM: SBFspot/SBFspot
-      ASSET_NAME: sbfspot-sqlite-arm-linux-bookworm.tar.gz
-      ASSET_SHA256: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
-      RASPBIAN_MIRROR: http://archive.raspbian.org/raspbian
-      RASPBIAN_SUITE: bookworm
       SYSGCC_URL: https://sysprogs.com/getfile/2275/raspberry-gcc12.2.0-r2.exe
-
     steps:
-      - name: Install host-side tooling
+      - name: Install Wine
         run: |
+          sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            debootstrap diffoscope xxd binutils file curl jq \
-            innoextract p7zip-full cabextract binwalk
+          sudo apt-get install -y --no-install-recommends wine wine32:i386 xvfb cabextract
 
       - name: Download SysGCC installer
         run: |
@@ -49,56 +37,109 @@ jobs:
           file sysgcc.exe
           sha256sum sysgcc.exe
 
-      - name: Extract SysGCC installer
+      - name: Silent-install SysGCC under Wine
         run: |
           set -uxo pipefail
-          mkdir -p sysgcc-extract
-          # Try extractors in order: 7z handles NSIS/self-extracting;
-          # innoextract = Inno Setup fallback; binwalk = last-resort scan.
-          echo "--- try 7z ---"
-          if 7z x -osysgcc-extract -y sysgcc.exe 2>&1 | tail -20; then
-            echo "7z ok"
-          else
-            echo "7z failed; trying innoextract"
-            innoextract -s -d sysgcc-extract sysgcc.exe 2>&1 | tail -10 || true
-          fi
-          echo "--- extracted size ---"
-          du -sh sysgcc-extract/ 2>/dev/null || echo "no extract dir"
-          echo "--- search for libstdc++.a (any depth) ---"
-          find sysgcc-extract -name 'libstdc++.a' 2>/dev/null -exec ls -la {} \;
-          if ! find sysgcc-extract -name 'libstdc++.a' 2>/dev/null | grep -q .; then
-            echo "--- NSIS installer likely nested; look for inner archive ---"
-            find sysgcc-extract -maxdepth 4 -type f | head -40
-            echo
-            echo "--- check for \$PLUGINSDIR and nested setup ---"
-            find sysgcc-extract -iname '*.7z' -o -iname '*.msi' -o -iname '*.cab' 2>/dev/null | head -10
+          export WINEPREFIX=$HOME/.wine-sysgcc
+          export WINEDEBUG=-all
+          # Pre-create prefix (non-interactive)
+          wineboot --init || true
+          sleep 2
+          # Sysprogs installers support /S silent flag (NSIS convention) or /SILENT;
+          # try both. Also try /D= to redirect install dir.
+          mkdir -p ~/sysgcc-install
+          WIN_INSTALL_DIR=$(winepath -w ~/sysgcc-install 2>/dev/null || echo "C:\\SysGCC\\raspberry")
+          echo "Install dir: $WIN_INSTALL_DIR"
+          xvfb-run -a wine sysgcc.exe /S "/D=${WIN_INSTALL_DIR}" &
+          WINE_PID=$!
+          # Wait up to 15 min for installer to finish. Poll for the target file.
+          for i in $(seq 1 180); do
+            if find ~/sysgcc-install $WINEPREFIX/drive_c -name 'libstdc++.a' 2>/dev/null | grep -q .; then
+              echo "libstdc++.a appeared at iteration $i"
+              break
+            fi
+            sleep 5
+          done
+          # Give installer a bit more time then kill if still running
+          sleep 10
+          kill $WINE_PID 2>/dev/null || true
+          wineserver -k 2>/dev/null || true
+
+      - name: Locate + collect libstdc++.a
+        run: |
+          set -uxo pipefail
+          export WINEPREFIX=$HOME/.wine-sysgcc
+          echo "--- search all paths ---"
+          find ~/sysgcc-install "$WINEPREFIX/drive_c" -name 'libstdc++.a' 2>/dev/null | while read f; do
+            s=$(stat -c%s "$f"); sha=$(sha256sum "$f" | awk '{print $1}')
+            echo "$f  size=$s sha=$sha"
+          done
+          LIBA=$(find ~/sysgcc-install "$WINEPREFIX/drive_c" -name 'libstdc++.a' 2>/dev/null | head -1)
+          if [ -z "$LIBA" ]; then
+            echo "ERROR: libstdc++.a not found"
+            echo "--- directory listing for debugging ---"
+            ls -la ~/sysgcc-install/ 2>/dev/null || echo "no sysgcc-install"
+            ls -la $WINEPREFIX/drive_c/ 2>/dev/null || echo "no drive_c"
+            find $WINEPREFIX/drive_c -maxdepth 4 -type d 2>/dev/null | head -20
             exit 1
           fi
-          LIBA=$(find sysgcc-extract -name 'libstdc++.a' | head -1)
-          echo "Using: $LIBA"
-          echo "sha256: $(sha256sum "$LIBA" | awk '{print $1}')"
-          file "$LIBA"
-          ar t "$LIBA" 2>/dev/null | wc -l || echo "ar failed"
-          cp "$LIBA" /tmp/sysgcc_libstdcxx.a
+          mkdir -p out
+          cp "$LIBA" out/sysgcc_libstdcxx.a
+          # Also try the bundled cross-g++ for its .comment introspection if possible
+          find ~/sysgcc-install "$WINEPREFIX/drive_c" -name 'arm-linux-gnueabihf-g++*' 2>/dev/null | head -3
+          echo "OK; uploading libstdc++.a"
 
-      - name: Fetch Raspbian keyring
+      - name: Upload libstdc++.a artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sysgcc-libstdcxx
+          path: out/sysgcc_libstdcxx.a
+          retention-days: 7
+
+  build:
+    needs: extract
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+      ASSET_NAME: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+      ASSET_SHA256: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+      RASPBIAN_MIRROR: http://archive.raspbian.org/raspbian
+      RASPBIAN_SUITE: bookworm
+
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap xxd binutils file curl jq
+
+      - name: Download SysGCC libstdc++.a artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: sysgcc-libstdcxx
+          path: /tmp/
+
+      - name: Inspect SysGCC libstdc++.a
+        run: |
+          set -euxo pipefail
+          ls -la /tmp/sysgcc_libstdcxx.a
+          file /tmp/sysgcc_libstdcxx.a
+          sha256sum /tmp/sysgcc_libstdcxx.a
+          ar t /tmp/sysgcc_libstdcxx.a 2>/dev/null | wc -l || echo "(not ar format)"
+
+      - name: Fetch Raspbian keyring + debootstrap
         run: |
           set -euxo pipefail
           mkdir -p keyring
-          curl -sSL https://archive.raspbian.org/raspbian.public.key \
-            -o keyring/raspbian.asc
+          curl -sSL https://archive.raspbian.org/raspbian.public.key -o keyring/raspbian.asc
           gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
-
-      - name: Debootstrap Raspbian bookworm armhf
-        run: |
-          set -euxo pipefail
-          sudo debootstrap \
-            --arch=armhf --variant=minbase \
-            --keyring=$PWD/keyring/raspbian.gpg \
-            --include=ca-certificates \
+          sudo debootstrap --arch=armhf --variant=minbase \
+            --keyring=$PWD/keyring/raspbian.gpg --include=ca-certificates \
             "${RASPBIAN_SUITE}" rootfs "${RASPBIAN_MIRROR}"
 
-      - name: Install build deps + record pre-sub libstdc++.a sha
+      - name: Install build deps + substitute libstdc++.a
         run: |
           set -euxo pipefail
           sudo chroot rootfs /bin/sh -euxc '
@@ -107,36 +148,29 @@ jobs:
             apt-get install -y --no-install-recommends \
               g++ make libbluetooth-dev \
               libboost-date-time-dev libboost-system-dev \
-              libsqlite3-dev libcurl4-openssl-dev \
-              binutils file
+              libsqlite3-dev libcurl4-openssl-dev binutils file
           '
-          echo "=== chroot's libstdc++.a BEFORE substitution ==="
+          echo "=== pre-substitution ==="
           for f in rootfs/usr/lib/gcc/arm-linux-gnueabihf/12/libstdc++.a \
                    rootfs/usr/lib/arm-linux-gnueabihf/libstdc++.a; do
-            [ -f "$f" ] && echo "$f: $(sudo sha256sum "$f" | awk '{print $1}')  size=$(sudo stat -c%s "$f")"
+            [ -f "$f" ] && echo "$f: sha=$(sudo sha256sum "$f" | awk '{print $1}')  size=$(sudo stat -c%s "$f")"
           done
-
-      - name: Substitute SysGCC libstdc++.a into chroot
-        run: |
-          set -euxo pipefail
-          # -static-libstdc++ picks from <gcc-install>/<triplet>/lib/ or
-          # /usr/lib/gcc/<triplet>/<ver>/libstdc++.a. Overwrite both to be safe.
           for f in rootfs/usr/lib/gcc/arm-linux-gnueabihf/12/libstdc++.a \
                    rootfs/usr/lib/arm-linux-gnueabihf/libstdc++.a; do
             if [ -f "$f" ]; then
               sudo cp /tmp/sysgcc_libstdcxx.a "$f"
-              echo "$f: AFTER sha=$(sudo sha256sum "$f" | awk '{print $1}')  size=$(sudo stat -c%s "$f")"
+              echo "AFTER $f: sha=$(sudo sha256sum "$f" | awk '{print $1}')"
             fi
           done
 
-      - name: Check out upstream V3.9.12
+      - name: Check out upstream + stage
         uses: actions/checkout@v4
         with:
           repository: ${{ env.UPSTREAM }}
           ref: ${{ env.TAG }}
           path: upstream
 
-      - name: Stage + install wrapper
+      - name: Stage + wrapper
         run: |
           set -euxo pipefail
           sudo mkdir -p rootfs/src
@@ -149,9 +183,11 @@ jobs:
           WRAP
           sudo chmod +x rootfs/usr/local/bin/g++
 
-      - name: Build SBFspot + daemon
+      - name: Build + compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euxo pipefail
+          set -uxo pipefail
           COMMON_LDFLAGS='-s -static-libstdc++ -Wl,--build-id=none'
           SBFSPOT_LDFLAGS="${COMMON_LDFLAGS} -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic"
           sudo chroot rootfs /bin/sh -euxc "
@@ -160,12 +196,6 @@ jobs:
             cd /src/SBFspotUploadDaemon
             make sqlite LDFLAGS='${COMMON_LDFLAGS}'
           "
-
-      - name: Download upstream + normalised-ELF compare
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -uxo pipefail
           url=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
@@ -184,26 +214,24 @@ jobs:
               objcopy --remove-section=.comment --remove-section=.note.gnu.build-id \
                 "out/${side}/${bin}.norm" 2>/dev/null || true
             done
-            s_u=$(stat -c%s "out/upstream/${bin}.norm")
-            s_o=$(stat -c%s "out/ours/${bin}.norm")
+            s_u=$(stat -c%s "out/upstream/${bin}.norm"); s_o=$(stat -c%s "out/ours/${bin}.norm")
             sha_u=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
             sha_o=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
             if [ "$sha_u" = "$sha_o" ]; then
-              echo "::notice title=SysGCC-substitution ${bin}::MATCH size=${s_u}"
-              echo "$bin: MATCH ✓  size=$s_u"
+              echo "::notice title=SysGCC-r2 ${bin}::MATCH size=${s_u}"
+              echo "$bin: MATCH ✓"
             else
-              echo "::warning title=SysGCC-substitution ${bin}::residual=$((s_o - s_u)) B"
-              echo "$bin: DIFF  upstream=$s_u ours=$s_o delta=$((s_o - s_u))"
+              echo "::warning title=SysGCC-r2 ${bin}::residual=$((s_o - s_u)) B"
+              echo "$bin: DIFF upstream=$s_u ours=$s_o delta=$((s_o - s_u))"
             fi
           done
 
-      - name: Upload artefacts
+      - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase5d-sysgcc-probe
+          name: phase5d-sysgcc-r2
           path: |
             out/
-            /tmp/sysgcc_libstdcxx.a
           retention-days: 90
           if-no-files-found: ignore
