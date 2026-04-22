@@ -25,9 +25,10 @@ jobs:
     steps:
       - name: Install tools
         run: |
+          sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            binwalk p7zip-full file curl xz-utils
+            file curl wine wine32:i386 xvfb scrot imagemagick
 
       - name: Download SysGCC installer
         run: |
@@ -37,68 +38,66 @@ jobs:
           file sysgcc.exe
           sha256sum sysgcc.exe
 
-      - name: Scan with binwalk + extract embedded archives
+      - name: Grep installer binary for embedded help strings
         run: |
           set -uxo pipefail
-          # Step 1: signature scan. Report all embedded streams.
-          binwalk sysgcc.exe 2>&1 | head -40 | tee binwalk-signatures.txt
+          echo "=== unicode strings (UTF-16LE) matching usage hints ==="
+          strings -e l sysgcc.exe | grep -iE 'usage|silent|/s |/q|/verysilent|/quiet|\-silent|\-quiet|command-line|help' | head -40 || true
           echo
-          # Step 2: extract recursively. binwalk -e extracts known formats
-          # (zip, 7z, lzma, cab, tar.gz, etc.) at each offset it recognises.
-          binwalk -Me sysgcc.exe 2>&1 | tail -30 || true
-          # Result dir: _sysgcc.exe.extracted/
-          echo "--- extracted dir tree ---"
-          find _sysgcc.exe.extracted -maxdepth 3 -type d 2>/dev/null | head -30
-          echo "--- search for libstdc++.a in the extract tree ---"
-          find _sysgcc.exe.extracted -name 'libstdc++.a' 2>/dev/null
-          echo "--- first MBs of any large extracted archives ---"
-          find _sysgcc.exe.extracted -size +1M -type f 2>/dev/null | head -20
+          echo "=== ascii strings matching usage hints ==="
+          strings sysgcc.exe | grep -iE 'usage|silent|/s |/q|/verysilent|/quiet|\-silent|\-quiet|command-line|help' | head -40 || true
+          echo
+          echo "=== strings mentioning 'sysprogs' or installer product ==="
+          strings -e l sysgcc.exe | grep -iE 'sysprogs|sysgcc|toolchain|GnuToolchain|raspberry' | head -20 || true
 
-      - name: Collect libstdc++.a (best effort)
+      - name: Run installer (bare, /?, --help, -h) + screenshots
         run: |
           set -uxo pipefail
+          export WINEPREFIX=$HOME/.wine-sysgcc
+          export WINEDEBUG=-all
+          sudo apt-get install -y --no-install-recommends tesseract-ocr || true
+          wineboot --init 2>/dev/null || true
+          sleep 3
           mkdir -p out
-          # Primary: from binwalk extract
-          LIBA=$(find _sysgcc.exe.extracted -name 'libstdc++.a' 2>/dev/null | head -1)
-          if [ -z "$LIBA" ]; then
-            # Secondary: search for the ar archive magic signature in the raw installer.
-            # libstdc++.a starts with '!<arch>\n' (0x21 3C 61 72 63 68 3E 0A).
-            echo "=== scanning raw installer for ar-archive magic ==="
-            # grep offsets where magic appears (hex 213c617263683e0a)
-            grep -abo '!<arch>' sysgcc.exe | head -20 || true
-            OFFSETS=$(grep -abo '!<arch>' sysgcc.exe | awk -F: '{print $1}')
-            for OFF in $OFFSETS; do
-              # extract 200 MB max from each hit; later parse to find true .a
-              dd if=sysgcc.exe of="candidate-$OFF.a" bs=1 skip=$OFF count=200000000 2>/dev/null
-              # Validate with ar t; if it parses, keep the first few hundred members for size
-              if ar t "candidate-$OFF.a" 2>/dev/null | head -3 | grep -q '.o$'; then
-                N=$(ar t "candidate-$OFF.a" 2>/dev/null | wc -l)
-                echo "candidate offset=$OFF: $N members"
-                # Heuristic: libstdc++.a has 300+ .o members
-                if [ "$N" -gt 100 ]; then
-                  # Truncate to exact archive length: find last member's file offset
-                  LIBA="candidate-$OFF.a"
-                  break
-                fi
-              fi
-            done
-          fi
-          if [ -z "$LIBA" ] || [ ! -f "$LIBA" ]; then
-            echo "ERROR: no libstdc++.a recovered"
-            exit 1
-          fi
-          cp "$LIBA" out/sysgcc_libstdcxx.a
-          ls -la out/sysgcc_libstdcxx.a
-          file out/sysgcc_libstdcxx.a
-          sha256sum out/sysgcc_libstdcxx.a
-          ar t out/sysgcc_libstdcxx.a 2>/dev/null | wc -l
+          Xvfb :99 -screen 0 1280x1024x24 &
+          XVFB_PID=$!
+          export DISPLAY=:99
+          sleep 2
+          run_and_snap() {
+            local label="$1"; shift
+            echo "=== RUN: wine sysgcc.exe $* ==="
+            (wine sysgcc.exe "$@" > "out/$label.out" 2>&1 &)
+            sleep 10
+            scrot "out/$label.png" 2>&1 || echo "(scrot failed)"
+            wineserver -k 2>/dev/null || true
+            sleep 3
+            echo "--- $label.out content ---"
+            cat "out/$label.out" 2>/dev/null | head -40 || true
+            echo "--- $label.png OCR ---"
+            tesseract "out/$label.png" - 2>/dev/null | head -40 || echo "(ocr failed)"
+            echo
+          }
+          run_and_snap bare           # <-- user request: just execute it
+          run_and_snap help-slashq /?
+          run_and_snap help-dashhelp --help
+          run_and_snap help-dashh -h
+          kill $XVFB_PID 2>/dev/null || true
+          ls -la out/
 
-      - name: Upload libstdc++.a artefact
+      - name: Upload diagnostic artefacts (screenshots + outputs)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sysgcc-libstdcxx
-          path: out/sysgcc_libstdcxx.a
+          name: sysgcc-probe-diag
+          path: out/
           retention-days: 7
+
+      - name: Stop pipeline after diagnostics (until we know the flag)
+        run: |
+          # Short-circuit: we're in investigation mode. Once a working
+          # silent-install flag is identified from screenshots/OCR, revert
+          # this and substitute libstdc++.a extraction.
+          exit 1
 
   build:
     needs: extract
