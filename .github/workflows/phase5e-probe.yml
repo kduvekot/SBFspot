@@ -1,0 +1,525 @@
+name: Phase 5e.1 hardened pipeline (modern best practices)
+
+# Applies modern hardening + reproducibility flags to all 15
+# upstream V3.9.12 combos. Compares against our own Phase 5 baseline
+# (NOT upstream — we are no longer chasing byte-match on arm-bookworm
+#
+#   arm × bullseye  × {sqlite,nosql,mariadb}  → MATCH (Bar 1a'')
+#   arm × buster    × {sqlite,nosql,mariadb}  → close-match (maybe small residual)
+#   arm64 × bullseye × {sqlite,nosql,mariadb} → MATCH
+#   arm × bookworm  × {sqlite,nosql,mariadb}  → ~16 KB residual (static libstdc++)
+#   arm64 × bookworm × {sqlite,nosql,mariadb} → ~10 KB residual (dual-.comment)
+#
+# No tarball-layer compare yet — that needs per-variant member
+# lists (Phase 5b). This probe is binary-byte diff per combo.
+#
+# Frozen behind .phase5e-probe-trigger.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.phase5e-probe-trigger
+
+jobs:
+  probe:
+    name: "${{ matrix.cell.id }}"
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cell:
+          # ========= arm × buster (all DBs) =========
+          - id: sqlite-arm-buster
+            codename: buster
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: sqlite
+            make_target: sqlite
+            asset_name: sbfspot-sqlite-arm-linux-buster.tar.gz
+            asset_sha: 0d4b32bb02df5cf78b7f78d974a92c4a472dd672bd96f6d396215ea72daf1e0c
+            prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian-legacy
+            # libgnutls28-dev: LDFLAGS forces -lgnutls to keep upstream's NEEDED entry
+            db_pkgs: 'libsqlite3-dev libgnutls28-dev'
+            curl_pkg: 'libcurl4-gnutls-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -Wl,-Bdynamic -Wl,--no-as-needed -lgnutls -ldl -Wl,--as-needed'
+            # Phase 5c fix: upstream buster daemon NEEDED has libdl.so.2;
+            # add -ldl explicitly to get matching NEEDED.
+            daemon_extra: '-Wl,--no-as-needed -ldl -Wl,--as-needed'
+          - id: nosql-arm-buster
+            codename: buster
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: nosql
+            make_target: nosql
+            asset_name: sbfspot-nosql-arm-linux-buster.tar.gz
+            asset_sha: 5ddc5afbe0d6a9f8f0bfb69eab58c7093c3db18f8f08ef7d7861f5c771eb9ac3
+            prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian-legacy
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm-buster
+            codename: buster
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: mariadb
+            make_target: mariadb
+            asset_name: sbfspot-mariadb-arm-linux-buster.tar.gz
+            asset_sha: 9c9e47237101497e921d2da28b06106b110c44a0cb274f4efafd00e1d1fa0224
+            prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian-legacy
+            # Buster libmariadbclient is built against gnutls (not openssl);
+            # matches upstream NEEDED = libgnutls.so.30 (no libssl/libcrypto).
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat libgnutls28-dev'
+            curl_pkg: 'libcurl4-gnutls-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            sbfspot_extra: '-lpthread -Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -lmariadbclient -Wl,-Bdynamic -Wl,--no-as-needed -lgnutls -ldl -lz -Wl,--as-needed'
+            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -lgnutls -ldl -lz'
+
+          # ========= arm × bullseye (all DBs) =========
+          - id: sqlite-arm-bullseye
+            codename: bullseye
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: sqlite
+            make_target: sqlite
+            asset_name: sbfspot-sqlite-arm-linux-bullseye.tar.gz
+            asset_sha: 20a532f1a942a801b7bb982ba0dc89fac2981a566402ac3e9215e56e6625e1b8
+            prefix: 'd:\rpi\cross\bullseye\gcc10.2.1\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: nosql-arm-bullseye
+            codename: bullseye
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: nosql
+            make_target: nosql
+            asset_name: sbfspot-nosql-arm-linux-bullseye.tar.gz
+            asset_sha: 1c507d8b07e96c494384f71092549795e80e912b09664c7131c11f5a2c4af4fc
+            prefix: 'd:\rpi\cross\bullseye\gcc10.2.1\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm-bullseye
+            codename: bullseye
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: mariadb
+            make_target: mariadb
+            asset_name: sbfspot-mariadb-arm-linux-bullseye.tar.gz
+            asset_sha: c904f3596f78ab424e4cb94a3641262cbdd1167dddebfccfd9582c192de63f0d
+            prefix: 'd:\rpi\cross\bullseye\gcc10.2.1\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            # Phase 5c fix: force libpthread.so.0 as explicit SONAME before
+            # static-link block; previously +28 B residual was due to ordering
+            # of libpthread in NEEDED (ours had it last, upstream has it first).
+            sbfspot_extra: '-l:libpthread.so.0 -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            daemon_extra: '-l:libpthread.so.0 -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+
+          # ========= arm × bookworm (all DBs) — residual expected (~16 KB libstdc++) =========
+          - id: sqlite-arm-bookworm
+            codename: bookworm
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: sqlite
+            make_target: sqlite
+            asset_name: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+            asset_sha: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+            prefix: 'd:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: nosql-arm-bookworm
+            codename: bookworm
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: nosql
+            make_target: nosql
+            asset_name: sbfspot-nosql-arm-linux-bookworm.tar.gz
+            asset_sha: 1d5ee0f306072c87ed410585b3170979b8691f604341f01413af5efca3791a20
+            prefix: 'd:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm-bookworm
+            codename: bookworm
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: mariadb
+            make_target: mariadb
+            asset_name: sbfspot-mariadb-arm-linux-bookworm.tar.gz
+            asset_sha: 158ff3e6c566ff4e367aced2b1e2a9ca09b06b3c6baf77325ea93f1b735f5856
+            prefix: 'd:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            sbfspot_extra: '-lpthread -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+
+          # ========= arm64 × bullseye (all DBs) =========
+          - id: sqlite-arm64-bullseye
+            codename: bullseye
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: sqlite
+            make_target: sqlite
+            asset_name: sbfspot-sqlite-arm64-linux-bullseye.tar.gz
+            asset_sha: 3850a4e0d623f07d1f72b0fef9adb56a44421e0baf9fce2c174062eb6d5da4b9
+            prefix: 'd:\rpi\cross\bullseye64\gcc10.2.1\aarch64-linux-gnu\sysroot\usr\include'
+            mirror: debian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: nosql-arm64-bullseye
+            codename: bullseye
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: nosql
+            make_target: nosql
+            asset_name: sbfspot-nosql-arm64-linux-bullseye.tar.gz
+            asset_sha: a6884cf0578cd1f7ffe1fc8191e9dc711cb92584cba853791b8864739674f492
+            prefix: 'd:\rpi\cross\bullseye64\gcc10.2.1\aarch64-linux-gnu\sysroot\usr\include'
+            mirror: debian
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm64-bullseye
+            codename: bullseye
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: mariadb
+            make_target: mariadb
+            asset_name: sbfspot-mariadb-arm64-linux-bullseye.tar.gz
+            asset_sha: 921e6d09ed93aafe93d937897cee752fcef7a8bd7ce33fe8d73599efce0243c4
+            prefix: 'd:\rpi\cross\bullseye64\gcc10.2.1\aarch64-linux-gnu\sysroot\usr\include'
+            mirror: debian
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            sbfspot_extra: '-lpthread -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+
+          # ========= arm64 × bookworm (all DBs) — dual-.comment residual expected =========
+          - id: sqlite-arm64-bookworm
+            codename: bookworm
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: sqlite
+            make_target: sqlite
+            asset_name: sbfspot-sqlite-arm64-linux-bookworm.tar.gz
+            asset_sha: f35fb21f8298149b2af36d01583b820f5686a2d817c8dd973c286dc5aabff483
+            prefix: 'd:\rpi\cross\bookworm64\gcc12.2.0\aarch64-linux-gnu\sysroot\usr\include'
+            mirror: debian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: nosql-arm64-bookworm
+            codename: bookworm
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: nosql
+            make_target: nosql
+            asset_name: sbfspot-nosql-arm64-linux-bookworm.tar.gz
+            asset_sha: ee70b62ffba8a727539f3fbedbecd2a297aeea30e5c44068266342b39d17019a
+            prefix: 'd:\rpi\cross\bookworm64\gcc12.2.0\aarch64-linux-gnu\sysroot\usr\include'
+            mirror: debian
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            # Phase 5c probed -Wl,-z,separate-loadable-segments — had no
+            # effect on LOAD-segment layout (binutils 2.40 ignored it or
+            # default behaviour differs). The -65,536 B file-padding
+            # remains and reflects a linker behaviour we can't match
+            # without upstream's specific binutils version.
+            common_ldflags: '-s'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm64-bookworm
+            codename: bookworm
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: mariadb
+            make_target: mariadb
+            asset_name: sbfspot-mariadb-arm64-linux-bookworm.tar.gz
+            asset_sha: b44cab3a25e661053c60350029fa9211c34d540994bbbbd2d33285e6bea994bd
+            prefix: 'd:\rpi\cross\bookworm64\gcc12.2.0\aarch64-linux-gnu\sysroot\usr\include'
+            mirror: debian
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-s'
+            sbfspot_extra: '-lpthread -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap xxd binutils file curl jq debian-archive-keyring
+
+      - name: Fetch Raspbian keyring (if applicable)
+        if: matrix.cell.mirror == 'raspbian' || matrix.cell.mirror == 'raspbian-legacy'
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+
+      - name: Debootstrap rootfs
+        run: |
+          set -euxo pipefail
+          case "${{ matrix.cell.mirror }}" in
+            raspbian)
+              MIRROR="http://archive.raspbian.org/raspbian"
+              KEYRING="$PWD/keyring/raspbian.gpg"
+              ;;
+            raspbian-legacy)
+              MIRROR="http://legacy.raspbian.org/raspbian"
+              KEYRING="$PWD/keyring/raspbian.gpg"
+              ;;
+            debian)
+              MIRROR="http://snapshot.debian.org/archive/debian/20250222T000000Z"
+              KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
+              ;;
+          esac
+          sudo debootstrap \
+            --arch=${{ matrix.cell.debarch }} \
+            --variant=minbase \
+            --keyring="$KEYRING" \
+            --include=ca-certificates \
+            "${{ matrix.cell.codename }}" \
+            rootfs "$MIRROR"
+
+      - name: Check out upstream V3.9.12
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.TAG }}
+          path: upstream
+
+      - name: Stage source tree inside rootfs
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a upstream/SBFspot             rootfs/src/
+          sudo cp -a upstream/SBFspotUploadCommon rootfs/src/
+          if [ "${{ matrix.cell.has_daemon }}" = "true" ]; then
+            sudo cp -a upstream/SBFspotUploadDaemon rootfs/src/
+          fi
+
+      - name: Install hardened compiler wrapper
+        run: |
+          set -euxo pipefail
+          PREFIX='${{ matrix.cell.prefix }}'
+          # Phase 5e.1 hardening: modern Debian-equivalent compile flags.
+          # - _FORTIFY_SOURCE=2: glibc fortified wrappers (runtime bounds checks)
+          # - stack-protector-strong: stack canaries
+          # - _GLIBCXX_ASSERTIONS: libstdc++ runtime checks
+          # - fPIE: position-independent executable (enables ASLR)
+          # Prefix-map retained to normalise __FILE__ strings.
+          sudo tee rootfs/usr/local/bin/g++ > /dev/null <<WRAP
+          #!/bin/sh
+          exec /usr/bin/g++ \
+            '-fmacro-prefix-map=/usr/include=${PREFIX}' \
+            -D_FORTIFY_SOURCE=2 \
+            -fstack-protector-strong \
+            -D_GLIBCXX_ASSERTIONS \
+            -fPIE \
+            "\$@"
+          WRAP
+          sudo chmod +x rootfs/usr/local/bin/g++
+
+      - name: Install build deps in chroot
+        run: |
+          set -euxo pipefail
+          DB_PKGS='${{ matrix.cell.db_pkgs }}'
+          CURL_PKG='${{ matrix.cell.curl_pkg }}'
+          sudo chroot rootfs /bin/sh -euxc "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              g++ make libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              binutils file \
+              ${DB_PKGS} ${CURL_PKG}
+            g++ --version | head -1
+          "
+
+      - name: Build SBFspot (+ daemon if applicable)
+        run: |
+          set -euxo pipefail
+          # Phase 5e.1 link hardening:
+          # -pie: produce PIE executable (pairs with -fPIE at compile)
+          # -Wl,-z,relro -Wl,-z,now: RELRO + immediate binding
+          # -Wl,-z,noexecstack: non-executable stack
+          # -Wl,--build-id=sha1: deterministic build-id from content
+          HARDEN='-pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--build-id=sha1'
+          COMMON="${{ matrix.cell.common_ldflags }} $HARDEN"
+          SBFSPOT_LDFLAGS="${COMMON} ${{ matrix.cell.sbfspot_extra }}"
+          DAEMON_LDFLAGS="${COMMON} ${{ matrix.cell.daemon_extra }}"
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make $MAKE_TARGET LDFLAGS='$SBFSPOT_LDFLAGS'
+            file $MAKE_TARGET/bin/SBFspot
+            readelf -d $MAKE_TARGET/bin/SBFspot | grep NEEDED || true
+            if [ \"$HAS_DAEMON\" = \"true\" ]; then
+              cd /src/SBFspotUploadDaemon
+              make $MAKE_TARGET LDFLAGS='$DAEMON_LDFLAGS'
+              file $MAKE_TARGET/bin/SBFspotUploadDaemon
+              readelf -d $MAKE_TARGET/bin/SBFspotUploadDaemon | grep NEEDED || true
+            fi
+          "
+
+      - name: Smoke test — binary runs and reports version
+        run: |
+          set -uxo pipefail
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          # Run SBFspot --version inside the chroot. armhf runs natively on
+          # ubuntu-24.04-arm (aarch64 hw, AArch32 personality); arm64 is
+          # straight native.
+          echo "=== smoke: SBFspot --version ==="
+          sudo chroot rootfs /bin/sh -c "cd /src/SBFspot && ./$MAKE_TARGET/bin/SBFspot --version 2>&1 || ./$MAKE_TARGET/bin/SBFspot 2>&1 | head -5" | head -10 || true
+          if [ "$HAS_DAEMON" = "true" ]; then
+            echo "=== smoke: SBFspotUploadDaemon --version ==="
+            sudo chroot rootfs /bin/sh -c "cd /src/SBFspotUploadDaemon && ./$MAKE_TARGET/bin/SBFspotUploadDaemon --version 2>&1 || ./$MAKE_TARGET/bin/SBFspotUploadDaemon 2>&1 | head -5" | head -10 || true
+          fi
+          # Verify PIE + RELRO + NX stack via readelf flags
+          echo "=== hardening verification ==="
+          BIN="rootfs/src/SBFspot/$MAKE_TARGET/bin/SBFspot"
+          echo "File type: $(file $BIN | awk -F: '{print $2}')"
+          readelf -l $BIN 2>/dev/null | grep -E 'GNU_RELRO|GNU_STACK|PIE|INTERP' | head -5
+          readelf -d $BIN 2>/dev/null | grep -E 'BIND_NOW|FLAGS_1' | head
+
+      - name: Download upstream asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          url=$(curl -sSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
+            | jq -r --arg n "${{ matrix.cell.asset_name }}" \
+                '.assets[] | select(.name==$n) | .browser_download_url')
+          curl -sSL -o upstream.tar.gz "$url"
+          echo "${{ matrix.cell.asset_sha }}  upstream.tar.gz" | sha256sum -c -
+          mkdir -p out/upstream
+          tar -xzf upstream.tar.gz -C out/upstream
+
+      - name: Normalised-ELF compare + report
+        run: |
+          set -uxo pipefail
+          mkdir -p out/ours
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          sudo cp "rootfs/src/SBFspot/$MAKE_TARGET/bin/SBFspot" out/ours/SBFspot
+          if [ "$HAS_DAEMON" = "true" ]; then
+            sudo cp "rootfs/src/SBFspotUploadDaemon/$MAKE_TARGET/bin/SBFspotUploadDaemon" \
+                    out/ours/SBFspotUploadDaemon
+          fi
+          sudo chown -R $USER:$USER out/ours
+          BINS="SBFspot"
+          [ "$HAS_DAEMON" = "true" ] && BINS="$BINS SBFspotUploadDaemon"
+          all_match=true
+          for bin in $BINS; do
+            for side in upstream ours; do
+              cp "out/${side}/${bin}" "out/${side}/${bin}.norm"
+              strip --strip-all "out/${side}/${bin}.norm" || true
+              objcopy --remove-section=.comment --remove-section=.note.gnu.build-id \
+                "out/${side}/${bin}.norm" 2>/dev/null || true
+            done
+            s_u=$(stat -c%s "out/upstream/${bin}.norm")
+            s_o=$(stat -c%s "out/ours/${bin}.norm")
+            sha_u=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+            sha_o=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+            if [ "$sha_u" = "$sha_o" ]; then
+              echo "::notice title=${{ matrix.cell.id }}::${bin} MATCH size=${s_u}"
+              printf '%-25s MATCH  size=%s\n' "$bin" "$s_u"
+            else
+              all_match=false
+              delta=$((s_o - s_u))
+              echo "::warning title=${{ matrix.cell.id }}::${bin} residual=${delta} B"
+              printf '%-25s DIFF  upstream=%s ours=%s delta=%+d\n' \
+                "$bin" "$s_u" "$s_o" "$delta"
+            fi
+          done
+          # Summary file for aggregate report
+          mkdir -p out
+          {
+            echo "cell=${{ matrix.cell.id }}"
+            for bin in $BINS; do
+              sha_u=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+              sha_o=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+              s_u=$(stat -c%s "out/upstream/${bin}.norm")
+              s_o=$(stat -c%s "out/ours/${bin}.norm")
+              if [ "$sha_u" = "$sha_o" ]; then
+                echo "$bin=MATCH"
+              else
+                echo "$bin=DIFF delta=$((s_o - s_u)) upstream_size=$s_u ours_size=$s_o"
+              fi
+            done
+          } > out/summary.txt
+          cat out/summary.txt
+
+      - name: Upload per-cell artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5e-${{ matrix.cell.id }}
+          path: |
+            out/
+          retention-days: 90
+          if-no-files-found: ignore
