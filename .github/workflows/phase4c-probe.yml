@@ -147,8 +147,13 @@ jobs:
             export DEB_BUILD_OPTIONS='nocheck nodoc parallel=\$(nproc)'
             export DEB_BUILD_PROFILES='nolang=ada nolang=d nolang=fortran nolang=go nolang=m2 nolang=objc nolang=obj-c++'
             if [ \"$USE_ENV\" = 'true' ]; then
-              export CFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables'
-              export CXXFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables'
+              # Phase 4c probe 2: add -D_GLIBCXX_ASSERTIONS alongside
+              # -fasynchronous-unwind-tables. Probe 1 proved the flag
+              # plumbing works but async alone closes only ~4 KB of the
+              # 16 KB residual; assertions should grow libstdc++'s LSDA
+              # tables (the 11.5 KB of .ARM.extab we're still missing).
+              export CFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables -D_GLIBCXX_ASSERTIONS'
+              export CXXFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables -D_GLIBCXX_ASSERTIONS'
               echo 'Set CXXFLAGS_FOR_TARGET='\$CXXFLAGS_FOR_TARGET
             fi
             dpkg-buildpackage -b -uc -us 2>&1 | tee /build/build.log | tail -500
