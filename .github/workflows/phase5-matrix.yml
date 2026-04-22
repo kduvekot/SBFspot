@@ -49,7 +49,9 @@ jobs:
             has_daemon: true
             common_ldflags: '-s'
             sbfspot_extra: '-Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -Wl,-Bdynamic -Wl,--no-as-needed -lgnutls -ldl -Wl,--as-needed'
-            daemon_extra: ''
+            # Phase 5c fix: upstream buster daemon NEEDED has libdl.so.2;
+            # add -ldl explicitly to get matching NEEDED.
+            daemon_extra: '-Wl,--no-as-needed -ldl -Wl,--as-needed'
           - id: nosql-arm-buster
             codename: buster
             debarch: armhf
@@ -132,8 +134,11 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-lpthread -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
-            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            # Phase 5c fix: force libpthread.so.0 as explicit SONAME before
+            # static-link block; previously +28 B residual was due to ordering
+            # of libpthread in NEEDED (ours had it last, upstream has it first).
+            sbfspot_extra: '-l:libpthread.so.0 -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            daemon_extra: '-l:libpthread.so.0 -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
 
           # ========= arm × bookworm (all DBs) — residual expected (~16 KB libstdc++) =========
           - id: sqlite-arm-bookworm
@@ -265,7 +270,11 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s'
+            # Phase 5c fix: prior run showed -65,536 B "residual" was LOAD-
+            # segment file-padding (ours packed file_offset 0x6e770 while
+            # upstream padded to 0x7e770 to match vaddr). Force upstream's
+            # alignment via -z separate-loadable-segments.
+            common_ldflags: '-s -Wl,-z,separate-loadable-segments'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm64-bookworm
