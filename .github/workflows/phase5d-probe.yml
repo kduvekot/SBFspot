@@ -1,0 +1,202 @@
+name: Phase 5d SysGCC libstdc++.a substitution probe
+
+# Tests the hypothesis that upstream uses SysGCC r2's libstdc++.a.
+# Downloads the SysGCC Raspberry GCC 12.2.0-r2 Windows installer,
+# extracts via innoextract, substitutes its libstdc++.a into our
+# Raspbian bookworm armhf chroot, rebuilds SBFspot, compares to
+# upstream V3.9.12.
+#
+# If upstream genuinely uses SysGCC (per Gemini forensic analysis),
+# libstdc++.a bytes should match and the 16 KB arm-bookworm
+# residual collapses to 0.
+#
+# Frozen behind .phase5d-probe-trigger.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.phase5d-probe-trigger
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+      ASSET_NAME: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+      ASSET_SHA256: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+      RASPBIAN_MIRROR: http://archive.raspbian.org/raspbian
+      RASPBIAN_SUITE: bookworm
+      SYSGCC_URL: https://sysprogs.com/getfile/2275/raspberry-gcc12.2.0-r2.exe
+
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap diffoscope xxd binutils file curl jq innoextract
+
+      - name: Download SysGCC installer
+        run: |
+          set -euxo pipefail
+          curl -sSL --fail -o sysgcc.exe "${SYSGCC_URL}"
+          ls -lh sysgcc.exe
+          file sysgcc.exe
+          sha256sum sysgcc.exe
+
+      - name: Extract with innoextract
+        run: |
+          set -euxo pipefail
+          mkdir -p sysgcc-extract
+          # Innoextract unpacks Inno Setup installers. -s silent.
+          innoextract -s -d sysgcc-extract sysgcc.exe 2>&1 | tail -40
+          echo "--- extracted size ---"
+          du -sh sysgcc-extract/
+          echo "--- search for libstdc++.a ---"
+          find sysgcc-extract -name 'libstdc++.a' -exec ls -la {} \;
+          echo "--- .comment of the cross-gcc itself (for curiosity) ---"
+          find sysgcc-extract -name 'arm-linux-gnueabihf-g++.exe' -exec ls {} \; | head -3 || true
+          # Grab the first libstdc++.a found (typically bundled with cross-gcc)
+          LIBA=$(find sysgcc-extract -name 'libstdc++.a' | head -1)
+          if [ -z "$LIBA" ]; then
+            echo "ERROR: no libstdc++.a found in SysGCC extract"
+            find sysgcc-extract -name '*.a' | head -20
+            exit 1
+          fi
+          echo "Using: $LIBA"
+          echo "sha256: $(sha256sum "$LIBA" | awk '{print $1}')"
+          file "$LIBA"
+          # Count .o members
+          ar t "$LIBA" 2>/dev/null | wc -l || echo "ar failed (may not be GNU ar format)"
+          cp "$LIBA" /tmp/sysgcc_libstdcxx.a
+
+      - name: Fetch Raspbian keyring
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+
+      - name: Debootstrap Raspbian bookworm armhf
+        run: |
+          set -euxo pipefail
+          sudo debootstrap \
+            --arch=armhf --variant=minbase \
+            --keyring=$PWD/keyring/raspbian.gpg \
+            --include=ca-certificates \
+            "${RASPBIAN_SUITE}" rootfs "${RASPBIAN_MIRROR}"
+
+      - name: Install build deps + record pre-sub libstdc++.a sha
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              g++ make libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              libsqlite3-dev libcurl4-openssl-dev \
+              binutils file
+          '
+          echo "=== chroot's libstdc++.a BEFORE substitution ==="
+          for f in rootfs/usr/lib/gcc/arm-linux-gnueabihf/12/libstdc++.a \
+                   rootfs/usr/lib/arm-linux-gnueabihf/libstdc++.a; do
+            [ -f "$f" ] && echo "$f: $(sudo sha256sum "$f" | awk '{print $1}')  size=$(sudo stat -c%s "$f")"
+          done
+
+      - name: Substitute SysGCC libstdc++.a into chroot
+        run: |
+          set -euxo pipefail
+          # -static-libstdc++ picks from <gcc-install>/<triplet>/lib/ or
+          # /usr/lib/gcc/<triplet>/<ver>/libstdc++.a. Overwrite both to be safe.
+          for f in rootfs/usr/lib/gcc/arm-linux-gnueabihf/12/libstdc++.a \
+                   rootfs/usr/lib/arm-linux-gnueabihf/libstdc++.a; do
+            if [ -f "$f" ]; then
+              sudo cp /tmp/sysgcc_libstdcxx.a "$f"
+              echo "$f: AFTER sha=$(sudo sha256sum "$f" | awk '{print $1}')  size=$(sudo stat -c%s "$f")"
+            fi
+          done
+
+      - name: Check out upstream V3.9.12
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.TAG }}
+          path: upstream
+
+      - name: Stage + install wrapper
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a upstream/SBFspot             rootfs/src/
+          sudo cp -a upstream/SBFspotUploadDaemon rootfs/src/
+          sudo cp -a upstream/SBFspotUploadCommon rootfs/src/
+          sudo tee rootfs/usr/local/bin/g++ > /dev/null <<'WRAP'
+          #!/bin/sh
+          exec /usr/bin/g++ '-fmacro-prefix-map=/usr/include=d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include' "$@"
+          WRAP
+          sudo chmod +x rootfs/usr/local/bin/g++
+
+      - name: Build SBFspot + daemon
+        run: |
+          set -euxo pipefail
+          COMMON_LDFLAGS='-s -static-libstdc++ -Wl,--build-id=none'
+          SBFSPOT_LDFLAGS="${COMMON_LDFLAGS} -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic"
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make sqlite LDFLAGS='${SBFSPOT_LDFLAGS}'
+            cd /src/SBFspotUploadDaemon
+            make sqlite LDFLAGS='${COMMON_LDFLAGS}'
+          "
+
+      - name: Download upstream + normalised-ELF compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uxo pipefail
+          url=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
+            | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .browser_download_url')
+          curl -sSL -o upstream.tar.gz "$url"
+          echo "${ASSET_SHA256}  upstream.tar.gz" | sha256sum -c -
+          mkdir -p out/upstream out/ours
+          tar -xzf upstream.tar.gz -C out/upstream
+          sudo cp rootfs/src/SBFspot/sqlite/bin/SBFspot out/ours/SBFspot
+          sudo cp rootfs/src/SBFspotUploadDaemon/sqlite/bin/SBFspotUploadDaemon out/ours/SBFspotUploadDaemon
+          sudo chown -R $USER:$USER out/ours
+          for bin in SBFspot SBFspotUploadDaemon; do
+            for side in upstream ours; do
+              cp "out/${side}/${bin}" "out/${side}/${bin}.norm"
+              strip --strip-all "out/${side}/${bin}.norm" || true
+              objcopy --remove-section=.comment --remove-section=.note.gnu.build-id \
+                "out/${side}/${bin}.norm" 2>/dev/null || true
+            done
+            s_u=$(stat -c%s "out/upstream/${bin}.norm")
+            s_o=$(stat -c%s "out/ours/${bin}.norm")
+            sha_u=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+            sha_o=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+            if [ "$sha_u" = "$sha_o" ]; then
+              echo "::notice title=SysGCC-substitution ${bin}::MATCH size=${s_u}"
+              echo "$bin: MATCH ✓  size=$s_u"
+            else
+              echo "::warning title=SysGCC-substitution ${bin}::residual=$((s_o - s_u)) B"
+              echo "$bin: DIFF  upstream=$s_u ours=$s_o delta=$((s_o - s_u))"
+            fi
+          done
+
+      - name: Upload artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5d-sysgcc-probe
+          path: |
+            out/
+            /tmp/sysgcc_libstdcxx.a
+          retention-days: 90
+          if-no-files-found: ignore
