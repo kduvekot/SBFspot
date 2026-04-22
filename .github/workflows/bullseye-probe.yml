@@ -1,0 +1,259 @@
+name: Phase 3.4 residual probe (sqlite x arm x bullseye)
+
+# One-off probe to test whether the arm x bookworm x sqlite 16 KB
+# residual is mostly a static-libstdc++ tax.
+#
+# Rationale (see docs/phase3.3-baseline.md):
+#   - All 15 upstream V3.9.12 tarballs are Windows-cross-compiled.
+#   - arm x bookworm is the only combo that static-links libstdc++.
+#     Every other combo dynamic-links it — so the EH-table bytes
+#     that dominate our 11.5 KB .ARM.extab residual simply aren't
+#     in the binary on other combos.
+#   - bullseye binary differences vs bookworm: GCC 10 (not 12),
+#     libstdc++ dynamic, libpthread separate (pre-glibc-2.34),
+#     normal build-id present. libbluetooth still static in upstream.
+#
+# Expected wall-clock: ~5 min (same pattern as release.yml).
+# Frozen behind .bullseye-probe-trigger.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.bullseye-probe-trigger
+
+jobs:
+  bullseye-probe:
+    name: Build + diffoscope sqlite x arm x bullseye
+    runs-on: ubuntu-24.04-arm
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+      ASSET_NAME: sbfspot-sqlite-arm-linux-bullseye.tar.gz
+      ASSET_SHA256: 20a532f1a942a801b7bb982ba0dc89fac2981a566402ac3e9215e56e6625e1b8
+      RASPBIAN_MIRROR: http://archive.raspbian.org/raspbian
+      RASPBIAN_SUITE: bullseye
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap diffoscope xxd binutils file curl jq \
+            dos2unix
+
+      - name: Fetch Raspbian archive keyring
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+
+      - name: Debootstrap Raspbian bullseye armhf (live archive)
+        run: |
+          set -euxo pipefail
+          sudo debootstrap \
+            --arch=armhf \
+            --variant=minbase \
+            --keyring=$PWD/keyring/raspbian.gpg \
+            --include=ca-certificates \
+            "${RASPBIAN_SUITE}" \
+            rootfs \
+            "${RASPBIAN_MIRROR}"
+          file rootfs/bin/ls
+
+      - name: Check out upstream V3.9.12
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.TAG }}
+          path: upstream
+
+      - name: Stage source tree inside rootfs
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a upstream/SBFspot             rootfs/src/
+          sudo cp -a upstream/SBFspotUploadDaemon rootfs/src/
+          sudo cp -a upstream/SBFspotUploadCommon rootfs/src/
+
+      - name: Install build deps in chroot
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              g++ make \
+              libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              libsqlite3-dev \
+              libcurl4-openssl-dev \
+              binutils file
+            g++ --version
+          '
+          mkdir -p out
+          sudo chroot rootfs /bin/sh -c \
+            'dpkg-query -W -f="${Package}\t${Version}\t${Architecture}\n"' \
+            | sort > out/rootfs-packages.txt
+
+      - name: Build SBFspot + SBFspotUploadDaemon (sqlite) inside chroot
+        run: |
+          set -euxo pipefail
+          # bullseye differences from the bookworm release.yml LDFLAGS:
+          #   - no -static-libstdc++: upstream NEEDED has libstdc++.so.6
+          #   - no -Wl,--build-id=none: upstream has a normal build-id
+          # Keep: -s (strip at link), static bluetooth (SBFspot only).
+          COMMON_LDFLAGS='-s'
+          SBFSPOT_LDFLAGS="${COMMON_LDFLAGS} -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic"
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make sqlite LDFLAGS='${SBFSPOT_LDFLAGS}'
+            readelf -d sqlite/bin/SBFspot | grep NEEDED || true
+
+            cd /src/SBFspotUploadDaemon
+            make sqlite LDFLAGS='${COMMON_LDFLAGS}'
+            readelf -d sqlite/bin/SBFspotUploadDaemon | grep NEEDED || true
+          "
+
+      - name: Stage tarball contents
+        run: |
+          set -euxo pipefail
+          mkdir -p staging
+          sudo cp rootfs/src/SBFspot/sqlite/bin/SBFspot staging/
+          sudo cp rootfs/src/SBFspotUploadDaemon/sqlite/bin/SBFspotUploadDaemon staging/
+          cp upstream/SBFspot/CreateSQLiteDB.sql     staging/
+          cp upstream/SBFspot/date_time_zonespec.csv staging/
+          cp upstream/SBFspot/SBFspot.cfg            staging/SBFspot.default.cfg
+          cp upstream/SBFspot/TagListDE-DE.txt       staging/
+          cp upstream/SBFspot/TagListEN-US.txt       staging/
+          cp upstream/SBFspot/TagListES-ES.txt       staging/
+          cp upstream/SBFspot/TagListFR-FR.txt       staging/
+          cp upstream/SBFspot/TagListIT-IT.txt       staging/
+          cp upstream/SBFspot/TagListNL-NL.txt       staging/
+          cp upstream/SBFspotUploadDaemon/SBFspotUpload.default.cfg staging/
+          sudo chown $USER:$USER staging/*
+          chmod 0777 staging/*
+          for f in \
+              staging/CreateSQLiteDB.sql \
+              staging/SBFspotUpload.default.cfg \
+              staging/TagListDE-DE.txt \
+              staging/TagListEN-US.txt \
+              staging/TagListES-ES.txt \
+              staging/TagListFR-FR.txt \
+              staging/TagListIT-IT.txt \
+              staging/TagListNL-NL.txt; do
+            unix2dos -q "$f"
+          done
+          # Same mtime table as bookworm — fingerprint.md confirms
+          # non-binary payload is byte-identical across all 15 tarballs.
+          touch -d '2024-02-13 13:36:02 UTC' staging/CreateSQLiteDB.sql
+          touch -d '2021-01-17 18:43:04 UTC' staging/date_time_zonespec.csv
+          touch -d '2024-02-13 13:36:03 UTC' staging/SBFspot.default.cfg
+          touch -d '2024-04-29 08:52:56 UTC' staging/SBFspotUpload.default.cfg
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListDE-DE.txt
+          touch -d '2024-06-15 17:28:09 UTC' staging/TagListEN-US.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListES-ES.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListFR-FR.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListIT-IT.txt
+          touch -d '2024-02-13 13:36:03 UTC' staging/TagListNL-NL.txt
+
+      - name: Assemble tarball
+        run: |
+          set -euxo pipefail
+          cat > staging/.members <<'EOF'
+          CreateSQLiteDB.sql
+          date_time_zonespec.csv
+          SBFspot
+          SBFspot.default.cfg
+          SBFspotUpload.default.cfg
+          SBFspotUploadDaemon
+          TagListDE-DE.txt
+          TagListEN-US.txt
+          TagListES-ES.txt
+          TagListFR-FR.txt
+          TagListIT-IT.txt
+          TagListNL-NL.txt
+          EOF
+          ( cd staging && \
+            tar --owner=0 --group=0 --numeric-owner \
+                --format=ustar \
+                -T .members \
+                -cf "../${ASSET_NAME%.gz}" \
+          )
+          gzip -n --fast "${ASSET_NAME%.gz}"
+          sha256sum "${ASSET_NAME}"
+
+      - name: Download upstream asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          url=$(curl -sSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
+            | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .browser_download_url')
+          curl -sSL -o upstream.tar.gz "$url"
+          echo "${ASSET_SHA256}  upstream.tar.gz" | sha256sum -c -
+
+      - name: diffoscope + normalised-ELF compare
+        run: |
+          set -uxo pipefail
+          mkdir -p out/ours out/upstream
+          : > out/diffoscope.txt
+          : > out/diffoscope.html
+          diffoscope \
+            --html out/diffoscope.html \
+            --text out/diffoscope.txt \
+            --max-report-size 100000000 \
+            upstream.tar.gz \
+            "${ASSET_NAME}" \
+            || true
+          echo "=== diffoscope.txt size ==="
+          wc -l out/diffoscope.txt
+
+          tar -xzf upstream.tar.gz -C out/upstream
+          tar -xzf "${ASSET_NAME}" -C out/ours
+          for bin in SBFspot SBFspotUploadDaemon; do
+            for side in upstream ours; do
+              cp "out/${side}/${bin}" "out/${side}/${bin}.norm"
+              strip --strip-all "out/${side}/${bin}.norm" || true
+              objcopy \
+                --remove-section=.comment \
+                --remove-section=.note.gnu.build-id \
+                "out/${side}/${bin}.norm" 2>/dev/null || true
+            done
+            size_up=$(stat -c%s "out/upstream/${bin}.norm")
+            size_ours=$(stat -c%s "out/ours/${bin}.norm")
+            delta=$((size_ours - size_up))
+            sha_up=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+            sha_ours=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+            printf '%s upstream: size=%s sha256=%s\n' "$bin" "$size_up"  "$sha_up"
+            printf '%s ours:     size=%s sha256=%s (delta %+d)\n' "$bin" "$size_ours" "$sha_ours" "$delta"
+            if [ "$sha_up" = "$sha_ours" ]; then
+              echo "MATCH: ${bin}"
+            else
+              echo "DIFF: ${bin}"
+              diffoscope \
+                --html "out/diffoscope-${bin}.html" \
+                --text "out/diffoscope-${bin}.txt" \
+                --max-report-size 100000000 \
+                "out/upstream/${bin}.norm" \
+                "out/ours/${bin}.norm" || true
+              wc -l "out/diffoscope-${bin}.txt" || true
+            fi
+          done
+
+      - name: Upload probe artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bullseye-probe-sqlite-arm
+          path: |
+            sbfspot-sqlite-arm-linux-bullseye.tar.gz
+            upstream.tar.gz
+            out/
+          retention-days: 90
