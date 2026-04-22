@@ -1,0 +1,279 @@
+name: Phase 4c libstdc++ flag-rebuild probe
+
+# Tests whether rebuilding libstdc++.a with -fasynchronous-unwind-tables
+# (vs the default -funwind-tables on armhf) closes the 16 KB residual
+# on arm x bookworm x sqlite.
+#
+# Rationale (see docs/phase4-baseline.md):
+#   - Residual is entirely in libstdc++.a's per-function .ARM.extab
+#     unwind metadata (+11 B/function average, same function set).
+#   - Debian's armhf gcc defaults to -funwind-tables (sync only:
+#     records at landing pads).
+#   - -fasynchronous-unwind-tables emits records at more instructions;
+#     would add ~10 B/function to extab.
+#   - This matches upstream's delta within ~1 B/function.
+#
+# Three knobs in parallel (matrix cells), to defeat whichever
+# precedence rule Debian's rules uses to override CXXFLAGS_FOR_TARGET:
+#   a. Env var CXXFLAGS_FOR_TARGET set before dpkg-buildpackage
+#   b. sed-patch debian/rules2.mk to append the flag to TARGET_LIB_FLAGS
+#   c. Both a + b
+#
+# Frozen behind .phase4c-probe-trigger. Each cell runs ~1h42m.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.phase4c-probe-trigger
+
+jobs:
+  probe:
+    name: "flag: ${{ matrix.cell.id }}"
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        cell:
+          - id: env-only
+            use_env: 'true'
+            use_sed: 'false'
+          - id: sed-only
+            use_env: 'false'
+            use_sed: 'true'
+          - id: env-and-sed
+            use_env: 'true'
+            use_sed: 'true'
+
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+      ASSET_NAME: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+      ASSET_SHA256: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+      RASPBIAN_MIRROR: http://archive.raspbian.org/raspbian
+      RASPBIAN_SUITE: bookworm
+      GCC_VER_RPI1: 12.2.0-14+rpi1
+      UPSTREAM_GCC_VER: 12.2.0
+
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap diffoscope xxd binutils file curl jq
+
+      - name: Fetch Raspbian keyring
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+
+      - name: Debootstrap Raspbian bookworm armhf
+        run: |
+          set -euxo pipefail
+          sudo debootstrap \
+            --arch=armhf \
+            --variant=minbase \
+            --keyring=$PWD/keyring/raspbian.gpg \
+            --include=ca-certificates \
+            "${RASPBIAN_SUITE}" rootfs "${RASPBIAN_MIRROR}"
+
+      - name: Enable deb-src + install gcc-12 build deps
+        run: |
+          set -euxo pipefail
+          sudo tee rootfs/etc/apt/sources.list > /dev/null <<EOF
+          deb     ${RASPBIAN_MIRROR} ${RASPBIAN_SUITE} main contrib non-free rpi
+          deb-src ${RASPBIAN_MIRROR} ${RASPBIAN_SUITE} main contrib non-free rpi
+          EOF
+          sudo chroot rootfs /bin/sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get build-dep -y --no-install-recommends gcc-12
+            apt-get install -y --no-install-recommends \
+              build-essential devscripts fakeroot dpkg-dev
+          '
+
+      - name: Fetch +rpi1 gcc-12 source + unpack
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/build
+          cd rootfs/build
+          POOL="${RASPBIAN_MIRROR}/pool/main/g/gcc-12"
+          for f in \
+              "gcc-12_${GCC_VER_RPI1}.dsc" \
+              "gcc-12_${GCC_VER_RPI1}.debian.tar.xz" \
+              "gcc-12_${UPSTREAM_GCC_VER}.orig.tar.gz"; do
+            sudo curl -sSL -o "$f" "$POOL/$f"
+          done
+          sudo chroot /home/runner/work/SBFspot/SBFspot/rootfs /bin/sh -euxc "
+            cd /build
+            dpkg-source --no-check -x gcc-12_${GCC_VER_RPI1}.dsc
+          "
+
+      - name: Apply sed-patch to debian/rules (if selected)
+        if: matrix.cell.use_sed == 'true'
+        run: |
+          set -euxo pipefail
+          # Debian gcc-12's debian/rules.d/rules2.mk computes
+          # TARGET_LIB_FLAGS which feeds CXXFLAGS_FOR_TARGET /
+          # CFLAGS_FOR_TARGET during the target libs build. Append
+          # our flag there.
+          SRCDIR="rootfs/build/gcc-12-${UPSTREAM_GCC_VER}"
+          ls "$SRCDIR/debian/rules.d/" | head -20 | sudo tee /dev/stderr
+          # Look for TARGET_LIB_FLAGS definition
+          sudo grep -rn 'TARGET_LIB_FLAGS' "$SRCDIR/debian/" | head -20 || true
+          # Prepend a small patch via sed that appends the flag
+          sudo sed -i 's/^\(TARGET_LIB_FLAGS[[:space:]]*=.*\)$/\1 -fasynchronous-unwind-tables/' \
+            "$SRCDIR/debian/rules.defs" 2>/dev/null || true
+          sudo sed -i 's/^\(TARGET_LIB_FLAGS[[:space:]]*=.*\)$/\1 -fasynchronous-unwind-tables/' \
+            "$SRCDIR/debian/rules.d/rules2.mk" 2>/dev/null || true
+          # Also add to a more general place: create a small override
+          sudo tee -a "$SRCDIR/debian/rules.defs" > /dev/null <<EOF
+
+          # Phase 4c probe: force async unwind tables on target libs
+          CFLAGS_FOR_TARGET += -fasynchronous-unwind-tables
+          CXXFLAGS_FOR_TARGET += -fasynchronous-unwind-tables
+          EOF
+          sudo grep -A1 'Phase 4c' "$SRCDIR/debian/rules.defs" | head
+
+      - name: Build gcc-12 with probe flag
+        run: |
+          set -euxo pipefail
+          USE_ENV='${{ matrix.cell.use_env }}'
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /build/gcc-12-${UPSTREAM_GCC_VER}
+            export DEB_BUILD_OPTIONS='nocheck nodoc parallel=\$(nproc)'
+            export DEB_BUILD_PROFILES='nolang=ada nolang=d nolang=fortran nolang=go nolang=m2 nolang=objc nolang=obj-c++'
+            if [ \"$USE_ENV\" = 'true' ]; then
+              export CFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables'
+              export CXXFLAGS_FOR_TARGET='-g -O2 -fasynchronous-unwind-tables'
+              echo 'Set CXXFLAGS_FOR_TARGET='\$CXXFLAGS_FOR_TARGET
+            fi
+            dpkg-buildpackage -b -uc -us 2>&1 | tee /build/build.log | tail -500
+          "
+
+      - name: Verify flag took effect in build log
+        run: |
+          set -uxo pipefail
+          echo "=== occurrences of async-unwind in build log ==="
+          sudo grep -c 'asynchronous-unwind-tables' rootfs/build/build.log || echo "(not found — flag did NOT flow through)"
+          echo "=== example libstdc++ compile command ==="
+          sudo grep -m1 'libstdc++-v3.*-o ' rootfs/build/build.log || true
+
+      - name: Install rebuilt toolchain + collect libstdc++.a sha
+        run: |
+          set -euxo pipefail
+          sudo cp rootfs/build/*.deb /tmp/ 2>/dev/null || true
+          ls /tmp/*.deb | head -5
+          # Extract libstdc++.a from the rebuilt package
+          mkdir -p /tmp/extract && cd /tmp/extract
+          LIBDEV=$(ls /tmp/libstdc++-12-dev_*.deb | head -1)
+          dpkg-deb -x "$LIBDEV" .
+          find . -name 'libstdc++.a' -exec sha256sum {} +
+          # Install into chroot
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /build
+            dpkg --force-downgrade -i *.deb || true
+            apt-get -f install -y
+            apt-mark hold gcc-12 g++-12 cpp-12 gcc-12-base libgcc-s1 \
+                          libgcc-12-dev libstdc++-12-dev libstdc++6 \
+                          libgomp1 libatomic1 libubsan1 libasan8 \
+                          libcc1-0 2>/dev/null || true
+          "
+
+      - name: Check out upstream V3.9.12 + stage
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.TAG }}
+          path: upstream
+      - run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a upstream/SBFspot             rootfs/src/
+          sudo cp -a upstream/SBFspotUploadDaemon rootfs/src/
+          sudo cp -a upstream/SBFspotUploadCommon rootfs/src/
+
+      - name: Install SBFspot build deps in chroot
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get install -y --no-install-recommends \
+              make libbluetooth-dev libboost-date-time-dev libboost-system-dev \
+              libsqlite3-dev libcurl4-openssl-dev binutils file
+          '
+
+      - name: Install prefix-map wrapper
+        run: |
+          set -euxo pipefail
+          sudo tee rootfs/usr/local/bin/g++ > /dev/null <<'WRAP'
+          #!/bin/sh
+          exec /usr/bin/g++ '-fmacro-prefix-map=/usr/include=d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include' "$@"
+          WRAP
+          sudo chmod +x rootfs/usr/local/bin/g++
+
+      - name: Build SBFspot + daemon
+        run: |
+          set -euxo pipefail
+          COMMON_LDFLAGS='-s -static-libstdc++ -Wl,--build-id=none'
+          SBFSPOT_LDFLAGS="${COMMON_LDFLAGS} -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic"
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make sqlite LDFLAGS='${SBFSPOT_LDFLAGS}'
+            cd /src/SBFspotUploadDaemon
+            make sqlite LDFLAGS='${COMMON_LDFLAGS}'
+          "
+
+      - name: Download upstream + normalised-ELF compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uxo pipefail
+          url=$(curl -sSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
+            | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .browser_download_url')
+          curl -sSL -o upstream.tar.gz "$url"
+          echo "${ASSET_SHA256}  upstream.tar.gz" | sha256sum -c -
+          mkdir -p out/upstream out/ours
+          tar -xzf upstream.tar.gz -C out/upstream
+          sudo cp rootfs/src/SBFspot/sqlite/bin/SBFspot out/ours/SBFspot
+          sudo cp rootfs/src/SBFspotUploadDaemon/sqlite/bin/SBFspotUploadDaemon out/ours/SBFspotUploadDaemon
+          sudo chown -R $USER:$USER out/ours
+          for bin in SBFspot SBFspotUploadDaemon; do
+            for side in upstream ours; do
+              cp "out/${side}/${bin}" "out/${side}/${bin}.norm"
+              strip --strip-all "out/${side}/${bin}.norm" || true
+              objcopy --remove-section=.comment --remove-section=.note.gnu.build-id \
+                "out/${side}/${bin}.norm" 2>/dev/null || true
+            done
+            s_u=$(stat -c%s "out/upstream/${bin}.norm")
+            s_o=$(stat -c%s "out/ours/${bin}.norm")
+            sha_u=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+            sha_o=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+            if [ "$sha_u" = "$sha_o" ]; then
+              echo "::notice title=${{ matrix.cell.id }} ${bin}::MATCH size=${s_u}"
+              printf '%s MATCH  size=%s\n' "$bin" "$s_u"
+            else
+              echo "::warning title=${{ matrix.cell.id }} ${bin}::residual=$((s_o - s_u)) B"
+              printf '%s DIFF  upstream=%s ours=%s delta=%+d\n' "$bin" "$s_u" "$s_o" "$((s_o - s_u))"
+            fi
+          done
+
+      - name: Upload artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase4c-${{ matrix.cell.id }}
+          path: |
+            out/
+            rootfs/build/build.log
+          retention-days: 90
+          if-no-files-found: ignore
