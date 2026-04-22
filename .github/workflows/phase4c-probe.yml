@@ -197,7 +197,7 @@ jobs:
           "
 
       - name: Check out upstream V3.9.12 + stage
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.UPSTREAM }}
           ref: ${{ env.TAG }}
@@ -279,7 +279,7 @@ jobs:
 
       - name: Upload artefacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: phase4c-${{ matrix.cell.id }}
           path: |

@@ -184,7 +184,7 @@ jobs:
           awk '{print $3, $2}' out/payload-sha256.txt | sort -u
 
       - name: Upload dissection artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: v3.9.12-fingerprint
           path: |

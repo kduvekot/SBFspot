@@ -189,7 +189,7 @@ jobs:
           file rootfs/bin/ls
 
       - name: Check out upstream V3.9.12
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.UPSTREAM }}
           ref: ${{ env.TAG }}
@@ -323,7 +323,7 @@ jobs:
 
       - name: Upload per-cell artefacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: phase35-${{ matrix.cell.id }}
           path: |

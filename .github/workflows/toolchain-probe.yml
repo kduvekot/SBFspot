@@ -198,7 +198,7 @@ jobs:
           grep -E '^(gcc-12|g\+\+-12|libstdc\+\+|libgcc)' out/rootfs-packages.txt || true
 
       - name: Check out upstream V3.9.12
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.UPSTREAM }}
           ref: ${{ env.TAG }}
@@ -369,7 +369,7 @@ jobs:
 
       - name: Upload probe artefacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: toolchain-probe-rpi1
           path: |

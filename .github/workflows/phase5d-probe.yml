@@ -115,7 +115,7 @@ jobs:
 
       - name: Upload libstdc++.a + screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sysgcc-libstdcxx
           path: out/
@@ -141,7 +141,7 @@ jobs:
             debootstrap xxd binutils file curl jq
 
       - name: Download SysGCC libstdc++.a artefact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sysgcc-libstdcxx
           path: /tmp/
@@ -189,7 +189,7 @@ jobs:
           done
 
       - name: Check out upstream + stage
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.UPSTREAM }}
           ref: ${{ env.TAG }}
@@ -253,7 +253,7 @@ jobs:
 
       - name: Upload
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: phase5d-sysgcc-r2
           path: |

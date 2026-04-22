@@ -84,7 +84,7 @@ jobs:
           head -20 out/rootfs-packages.txt
 
       - name: Check out upstream V3.9.12
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.UPSTREAM }}
           ref: ${{ env.TAG }}
@@ -335,7 +335,7 @@ jobs:
           done
 
       - name: Upload build artefacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-mvp-sqlite-arm-bookworm
           path: |
