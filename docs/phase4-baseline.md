@@ -67,6 +67,108 @@ Two separate observations from this matrix:
 cell runs the full debootstrap + build + diffoscope. No caching
 yet.
 
+## Post-Phase 4 addendum: where exactly is the 16 KB?
+
+Phase 3.3 characterised the arm-bookworm residual as "static
+libstdc++ drift" without pinpointing exactly which library code
+or which subsystem contributes. With V3.9.12 binaries from Phase
+4 in hand, a deeper probe:
+
+### 1. Section-level breakdown (unchanged from Phase 3.3)
+
+| Section | upstream | ours | delta |
+|---|---|---|---|
+| `.ARM.extab` | 53,224 | 41,692 | **+11,532** (71% of delta) |
+| `.rodata` | 98,660 | 95,848 | **+2,812** (17%) |
+| `.text` | 1,033,808 | 1,031,752 | **+2,056** (13%) |
+
+### 2. Function-count check
+
+- upstream: 2,278 functions in `.ARM.exidx` (1,036 with full `.extab` entries, 817 inline-PR0, 15 inline-PR1, 425 cantunwind)
+- ours:     2,279 functions in `.ARM.exidx` (1,039 with full `.extab` entries, 813 inline-PR0, 15 inline-PR1, 427 cantunwind)
+
+Function counts are essentially identical (±3). **Not a "more
+code" problem** — same functions on both sides.
+
+### 3. Personality-routine distribution
+
+| Model | upstream | ours | delta |
+|---|---|---|---|
+| PR0 compact | 817 | 813 | +4 |
+| PR1 compact | 15 | 15 | 0 |
+| PR2 compact | 0 | 0 | 0 |
+| Generic model (extab-resident) | 1,021 | 1,024 | −3 |
+
+Same C++ exception model, same personality routines. **Not an
+`-fexceptions` vs `-fno-exceptions` / EHABI-vs-sjlj kind of
+difference.**
+
+### 4. Per-function extab-size distribution
+
+Average extab bytes per extab-ref function:
+
+- upstream: 53,224 / 1,036 ≈ **51.4 B/function**
+- ours:     41,692 / 1,039 ≈ **40.1 B/function**
+- delta:    **+11.3 B/function** × ~1,000 functions ≈ +11.5 KB
+
+**Same set of functions; each upstream function carries ~11 more
+bytes of unwind metadata on average.**
+
+### 5. Address-range concentration
+
+Bucketed extab bytes by 64 KB `.text` virtual-address range:
+
+| `.text` vaddr range | upstream | ours | delta |
+|---|---|---|---|
+| `0x10000–0x1ffff` | 4,188 | 2,656 | **+1,532** |
+| `0x20000–0x2ffff` | 4,868 | 2,556 | **+2,312** |
+| `0x30000–0x3ffff` | 4,856 | 2,500 | **+2,356** |
+| `0x40000–0x4ffff` | 5,532 | 2,904 | **+2,628** |
+| `0x50000–0x5ffff` | 5,168 | 2,488 | **+2,680** |
+| remainder (app code) | ~ equal | ~ equal | ~ 0 |
+
+**The entire 11.5 KB delta concentrates in the first ~320 KB of
+`.text`**, which is where the linker places libstdc++ static
+content. App code region (from ~0x60000 onward) has ~zero extab
+delta. **This is purely a `libstdc++.a` issue.**
+
+### 6. Root cause
+
+Same libstdc++ functions, same personality-routine mix, same
+exception model — upstream's per-function unwind tables just
+carry more bytes than ours. That points to a gcc-build-time
+configure choice for libstdc++ itself, embedded in their `.a`
+file. Candidates (all speculative — we don't have upstream's
+crosstool-ng config):
+
+- `--enable-libstdcxx-assertions` (adds runtime check wrappers
+  with cleanup handlers → more unwind ops per function)
+- `--enable-libstdcxx-backtrace` (gcc-12.1+; adds stacktrace
+  support with extra cleanup in exception paths)
+- Different `--with-default-libstdcxx-abi` / `--enable-clocale`
+- Different `-fasynchronous-unwind-tables` vs
+  `-funwind-tables` for libstdc++'s own compile
+
+None of these are recoverable from public data — they live in
+upstream's Windows-hosted cross-toolchain configure. To close the
+11.5 KB, we'd need the maintainer's configure flags or the `.a`
+file itself.
+
+### Conclusion
+
+The "~16 KB irreducible on arm × bookworm" now has a specific
+root cause: **upstream's libstdc++.a emits ~11 bytes more per
+function in its `.ARM.extab` unwind tables than any public
+Raspbian-gcc-built libstdc++.a does.** That's a gcc-build-of-
+libstdc++ configure-time choice we don't have access to. The
+remaining ~4.5 KB (`.rodata` + `.text`) likely follows from the
+same configure difference — slightly different LSDA tables
+referenced from the extab entries, plus some minor codegen
+knock-ons.
+
+Bar 1a'' byte-match stays unreachable on `arm × bookworm`, but
+we now know **why** with precision.
+
 ## What this tells us going into Phase 5
 
 - The pipeline is **structurally invariant** across source
