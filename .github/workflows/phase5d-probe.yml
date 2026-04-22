@@ -38,7 +38,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            debootstrap diffoscope xxd binutils file curl jq innoextract
+            debootstrap diffoscope xxd binutils file curl jq \
+            innoextract p7zip-full cabextract binwalk
 
       - name: Download SysGCC installer
         run: |
@@ -48,30 +49,36 @@ jobs:
           file sysgcc.exe
           sha256sum sysgcc.exe
 
-      - name: Extract with innoextract
+      - name: Extract SysGCC installer
         run: |
-          set -euxo pipefail
+          set -uxo pipefail
           mkdir -p sysgcc-extract
-          # Innoextract unpacks Inno Setup installers. -s silent.
-          innoextract -s -d sysgcc-extract sysgcc.exe 2>&1 | tail -40
+          # Try extractors in order: 7z handles NSIS/self-extracting;
+          # innoextract = Inno Setup fallback; binwalk = last-resort scan.
+          echo "--- try 7z ---"
+          if 7z x -osysgcc-extract -y sysgcc.exe 2>&1 | tail -20; then
+            echo "7z ok"
+          else
+            echo "7z failed; trying innoextract"
+            innoextract -s -d sysgcc-extract sysgcc.exe 2>&1 | tail -10 || true
+          fi
           echo "--- extracted size ---"
-          du -sh sysgcc-extract/
-          echo "--- search for libstdc++.a ---"
-          find sysgcc-extract -name 'libstdc++.a' -exec ls -la {} \;
-          echo "--- .comment of the cross-gcc itself (for curiosity) ---"
-          find sysgcc-extract -name 'arm-linux-gnueabihf-g++.exe' -exec ls {} \; | head -3 || true
-          # Grab the first libstdc++.a found (typically bundled with cross-gcc)
-          LIBA=$(find sysgcc-extract -name 'libstdc++.a' | head -1)
-          if [ -z "$LIBA" ]; then
-            echo "ERROR: no libstdc++.a found in SysGCC extract"
-            find sysgcc-extract -name '*.a' | head -20
+          du -sh sysgcc-extract/ 2>/dev/null || echo "no extract dir"
+          echo "--- search for libstdc++.a (any depth) ---"
+          find sysgcc-extract -name 'libstdc++.a' 2>/dev/null -exec ls -la {} \;
+          if ! find sysgcc-extract -name 'libstdc++.a' 2>/dev/null | grep -q .; then
+            echo "--- NSIS installer likely nested; look for inner archive ---"
+            find sysgcc-extract -maxdepth 4 -type f | head -40
+            echo
+            echo "--- check for \$PLUGINSDIR and nested setup ---"
+            find sysgcc-extract -iname '*.7z' -o -iname '*.msi' -o -iname '*.cab' 2>/dev/null | head -10
             exit 1
           fi
+          LIBA=$(find sysgcc-extract -name 'libstdc++.a' | head -1)
           echo "Using: $LIBA"
           echo "sha256: $(sha256sum "$LIBA" | awk '{print $1}')"
           file "$LIBA"
-          # Count .o members
-          ar t "$LIBA" 2>/dev/null | wc -l || echo "ar failed (may not be GNU ar format)"
+          ar t "$LIBA" 2>/dev/null | wc -l || echo "ar failed"
           cp "$LIBA" /tmp/sysgcc_libstdcxx.a
 
       - name: Fetch Raspbian keyring
