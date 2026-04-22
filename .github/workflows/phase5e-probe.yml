@@ -1,17 +1,20 @@
 name: Phase 5e.1 hardened pipeline (modern best practices)
 
 # Applies modern hardening + reproducibility flags to all 15
-# upstream V3.9.12 combos. Compares against our own Phase 5 baseline
-# (NOT upstream — we are no longer chasing byte-match on arm-bookworm
+# upstream V3.9.12 combos. We no longer chase upstream byte-match;
+# the upstream-asset compare remains in the workflow only as a
+# size-delta reference.
 #
-#   arm × bullseye  × {sqlite,nosql,mariadb}  → MATCH (Bar 1a'')
-#   arm × buster    × {sqlite,nosql,mariadb}  → close-match (maybe small residual)
-#   arm64 × bullseye × {sqlite,nosql,mariadb} → MATCH
-#   arm × bookworm  × {sqlite,nosql,mariadb}  → ~16 KB residual (static libstdc++)
-#   arm64 × bookworm × {sqlite,nosql,mariadb} → ~10 KB residual (dual-.comment)
+# Compile (via /usr/local/bin/g++ wrapper):
+#   -D_FORTIFY_SOURCE=2 -fstack-protector-strong
+#   -D_GLIBCXX_ASSERTIONS -fPIE
+#   -fmacro-prefix-map=/usr/include=<upstream prefix>  (__FILE__ stability)
 #
-# No tarball-layer compare yet — that needs per-variant member
-# lists (Phase 5b). This probe is binary-byte diff per combo.
+# Link:
+#   -pie  -Wl,-z,relro  -Wl,-z,now  -Wl,-z,noexecstack
+#   -Wl,--build-id=sha1
+#   libbluetooth / libmariadbclient linked dynamically (no static
+#   non-PIC archives → no TEXTREL on armhf PIE).
 #
 # Frozen behind .phase5e-probe-trigger.
 
@@ -43,15 +46,12 @@ jobs:
             asset_sha: 0d4b32bb02df5cf78b7f78d974a92c4a472dd672bd96f6d396215ea72daf1e0c
             prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
             mirror: raspbian-legacy
-            # libgnutls28-dev: LDFLAGS forces -lgnutls to keep upstream's NEEDED entry
-            db_pkgs: 'libsqlite3-dev libgnutls28-dev'
+            db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -Wl,-Bdynamic -Wl,--no-as-needed -lgnutls -ldl -Wl,--as-needed'
-            # Phase 5c fix: upstream buster daemon NEEDED has libdl.so.2;
-            # add -ldl explicitly to get matching NEEDED.
-            daemon_extra: '-Wl,--no-as-needed -ldl -Wl,--as-needed'
+            sbfspot_extra: ''
+            daemon_extra: ''
           - id: nosql-arm-buster
             codename: buster
             debarch: armhf
@@ -66,7 +66,7 @@ jobs:
             curl_pkg: ''
             has_daemon: false
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -Wl,-Bdynamic'
+            sbfspot_extra: ''
             daemon_extra: ''
           - id: mariadb-arm-buster
             codename: buster
@@ -78,14 +78,14 @@ jobs:
             asset_sha: 9c9e47237101497e921d2da28b06106b110c44a0cb274f4efafd00e1d1fa0224
             prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
             mirror: raspbian-legacy
-            # Buster libmariadbclient is built against gnutls (not openssl);
-            # matches upstream NEEDED = libgnutls.so.30 (no libssl/libcrypto).
-            db_pkgs: 'libmariadb-dev libmariadb-dev-compat libgnutls28-dev'
+            # buster's libmariadb3 is built against gnutls, not openssl,
+            # so libcurl4-gnutls-dev matches the system-installed curl ABI.
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-lpthread -Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -lmariadbclient -Wl,-Bdynamic -Wl,--no-as-needed -lgnutls -ldl -lz -Wl,--as-needed'
-            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -lgnutls -ldl -lz'
+            sbfspot_extra: ''
+            daemon_extra: ''
 
           # ========= arm × bullseye (all DBs) =========
           - id: sqlite-arm-bullseye
@@ -102,7 +102,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            sbfspot_extra: ''
             daemon_extra: ''
           - id: nosql-arm-bullseye
             codename: bullseye
@@ -118,7 +118,7 @@ jobs:
             curl_pkg: ''
             has_daemon: false
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            sbfspot_extra: ''
             daemon_extra: ''
           - id: mariadb-arm-bullseye
             codename: bullseye
@@ -134,13 +134,10 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            # Phase 5c fix: force libpthread.so.0 as explicit SONAME before
-            # static-link block; previously +28 B residual was due to ordering
-            # of libpthread in NEEDED (ours had it last, upstream has it first).
-            sbfspot_extra: '-l:libpthread.so.0 -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
-            daemon_extra: '-l:libpthread.so.0 -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            sbfspot_extra: ''
+            daemon_extra: ''
 
-          # ========= arm × bookworm (all DBs) — residual expected (~16 KB libstdc++) =========
+          # ========= arm × bookworm (all DBs) =========
           - id: sqlite-arm-bookworm
             codename: bookworm
             debarch: armhf
@@ -155,7 +152,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            sbfspot_extra: ''
             daemon_extra: ''
           - id: nosql-arm-bookworm
             codename: bookworm
@@ -171,7 +168,7 @@ jobs:
             curl_pkg: ''
             has_daemon: false
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            sbfspot_extra: ''
             daemon_extra: ''
           - id: mariadb-arm-bookworm
             codename: bookworm
@@ -187,8 +184,8 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-lpthread -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
-            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            sbfspot_extra: ''
+            daemon_extra: ''
 
           # ========= arm64 × bullseye (all DBs) =========
           - id: sqlite-arm64-bullseye
@@ -205,7 +202,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            sbfspot_extra: ''
             daemon_extra: ''
           - id: nosql-arm64-bullseye
             codename: bullseye
@@ -221,7 +218,7 @@ jobs:
             curl_pkg: ''
             has_daemon: false
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            sbfspot_extra: ''
             daemon_extra: ''
           - id: mariadb-arm64-bullseye
             codename: bullseye
@@ -237,8 +234,8 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-lpthread -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
-            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            sbfspot_extra: ''
+            daemon_extra: ''
 
           # ========= arm64 × bookworm (all DBs) — dual-.comment residual expected =========
           - id: sqlite-arm64-bookworm
@@ -255,7 +252,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            sbfspot_extra: ''
             daemon_extra: ''
           - id: nosql-arm64-bookworm
             codename: bookworm
@@ -270,13 +267,8 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            # Phase 5c probed -Wl,-z,separate-loadable-segments — had no
-            # effect on LOAD-segment layout (binutils 2.40 ignored it or
-            # default behaviour differs). The -65,536 B file-padding
-            # remains and reflects a linker behaviour we can't match
-            # without upstream's specific binutils version.
             common_ldflags: '-s'
-            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            sbfspot_extra: ''
             daemon_extra: ''
           - id: mariadb-arm64-bookworm
             codename: bookworm
@@ -292,8 +284,8 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-lpthread -Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
-            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            sbfspot_extra: ''
+            daemon_extra: ''
 
     env:
       TAG: V3.9.12
