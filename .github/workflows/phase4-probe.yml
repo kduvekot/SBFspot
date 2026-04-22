@@ -1,0 +1,227 @@
+name: Phase 4 version back-test (V3.9.10/11/12 x sqlite x arm x bookworm)
+
+# Gate: verify the Phase 3.3 pipeline (with Phase 3.4's prefix-map
+# wrapper) produces a consistent residual-shape vs upstream across
+# three V3.9.x source tags. A consistent residual means the
+# pipeline's reproducibility bar holds across versions; a drifting
+# residual would mean something version-specific in upstream's
+# build setup that we haven't characterised.
+#
+# Uses the current release.yml shape: debootstrap Raspbian Bookworm
+# armhf, build SBFspot + SBFspotUploadDaemon with
+#   -s -static-libstdc++ -Wl,--build-id=none
+#   -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic   (SBFspot only)
+# plus the Phase 3.4 /usr/local/bin/g++ wrapper that appends
+# -fmacro-prefix-map for bookworm armhf.
+#
+# Frozen behind .phase4-probe-trigger.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.phase4-probe-trigger
+
+jobs:
+  backtest:
+    name: "${{ matrix.cell.tag }}"
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cell:
+          - tag: V3.9.10
+            asset_sha: 44a293baa6443feb3e8dd53e58d74470a23d53a1f4ae52e54ecff2363b770261
+          - tag: V3.9.11
+            asset_sha: 04b574ba1426d944ccd156ed12d5bf64ee59a8839617c48d3b2eb1dc7ba656d3
+          - tag: V3.9.12
+            asset_sha: 887a393a64dc6d0924c9afa92047002b95a42395c1a2a20ecc09ca71acacabb0
+
+    env:
+      UPSTREAM: SBFspot/SBFspot
+      ASSET_NAME: sbfspot-sqlite-arm-linux-bookworm.tar.gz
+      RASPBIAN_MIRROR: http://archive.raspbian.org/raspbian
+      RASPBIAN_SUITE: bookworm
+      # Upstream's bookworm-arm prefix (audit across V3.9.10/11/12
+      # shows identical path strings — upstream's build setup is
+      # stable across tags).
+      PREFIX_MAP: 'd:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include'
+
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap diffoscope xxd binutils file curl jq
+
+      - name: Fetch Raspbian keyring
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+
+      - name: Debootstrap Raspbian bookworm armhf (live archive)
+        run: |
+          set -euxo pipefail
+          sudo debootstrap \
+            --arch=armhf \
+            --variant=minbase \
+            --keyring=$PWD/keyring/raspbian.gpg \
+            --include=ca-certificates \
+            "${RASPBIAN_SUITE}" \
+            rootfs \
+            "${RASPBIAN_MIRROR}"
+          file rootfs/bin/ls
+
+      - name: Check out upstream ${{ matrix.cell.tag }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ matrix.cell.tag }}
+          path: upstream
+
+      - name: Stage source tree inside rootfs
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a upstream/SBFspot             rootfs/src/
+          sudo cp -a upstream/SBFspotUploadDaemon rootfs/src/
+          sudo cp -a upstream/SBFspotUploadCommon rootfs/src/
+
+      - name: Install build deps in chroot
+        run: |
+          set -euxo pipefail
+          sudo chroot rootfs /bin/sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              g++ make \
+              libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              libsqlite3-dev \
+              libcurl4-openssl-dev \
+              binutils file
+            g++ --version | head -1
+          '
+
+      - name: Install compiler wrapper with bookworm-arm prefix
+        run: |
+          set -euxo pipefail
+          # Single-quoted heredoc preserves backslashes verbatim.
+          # Inside, single quotes preserve them through to real g++.
+          sudo tee rootfs/usr/local/bin/g++ > /dev/null <<'WRAP'
+          #!/bin/sh
+          exec /usr/bin/g++ '-fmacro-prefix-map=/usr/include=d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include' "$@"
+          WRAP
+          sudo chmod +x rootfs/usr/local/bin/g++
+
+      - name: Build SBFspot + SBFspotUploadDaemon (sqlite)
+        run: |
+          set -euxo pipefail
+          # Same LDFLAGS as the Phase 3.3 release.yml.
+          COMMON_LDFLAGS='-s -static-libstdc++ -Wl,--build-id=none'
+          SBFSPOT_LDFLAGS="${COMMON_LDFLAGS} -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic"
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make sqlite LDFLAGS='${SBFSPOT_LDFLAGS}'
+            readelf -d sqlite/bin/SBFspot | grep NEEDED || true
+
+            cd /src/SBFspotUploadDaemon
+            make sqlite LDFLAGS='${COMMON_LDFLAGS}'
+            readelf -d sqlite/bin/SBFspotUploadDaemon | grep NEEDED || true
+          "
+
+      - name: Download upstream ${{ matrix.cell.tag }} asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          url=$(curl -sSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${{ matrix.cell.tag }}" \
+            | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .browser_download_url')
+          curl -sSL -o upstream.tar.gz "$url"
+          echo "${{ matrix.cell.asset_sha }}  upstream.tar.gz" | sha256sum -c -
+          mkdir -p out/upstream
+          tar -xzf upstream.tar.gz -C out/upstream
+
+      - name: Normalised-ELF compare
+        run: |
+          set -uxo pipefail
+          mkdir -p out/ours
+          sudo cp rootfs/src/SBFspot/sqlite/bin/SBFspot out/ours/SBFspot
+          sudo cp rootfs/src/SBFspotUploadDaemon/sqlite/bin/SBFspotUploadDaemon out/ours/SBFspotUploadDaemon
+          sudo chown -R $USER:$USER out/ours
+          for bin in SBFspot SBFspotUploadDaemon; do
+            for side in upstream ours; do
+              cp "out/${side}/${bin}" "out/${side}/${bin}.norm"
+              strip --strip-all "out/${side}/${bin}.norm" || true
+              objcopy \
+                --remove-section=.comment \
+                --remove-section=.note.gnu.build-id \
+                "out/${side}/${bin}.norm" 2>/dev/null || true
+            done
+            s_u=$(stat -c%s "out/upstream/${bin}.norm")
+            s_o=$(stat -c%s "out/ours/${bin}.norm")
+            sha_u=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+            sha_o=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+            if [ "$sha_u" = "$sha_o" ]; then
+              echo "::notice title=${{ matrix.cell.tag }} ${bin}::MATCH size=${s_u}"
+              printf '%s MATCH  size=%s  sha=%s\n' "$bin" "$s_u" "$sha_u"
+            else
+              echo "::warning title=${{ matrix.cell.tag }} ${bin}::residual=$((s_o - s_u)) B (expected on arm x bookworm)"
+              printf '%s DIFF  upstream=%s ours=%s delta=%+d\n' "$bin" "$s_u" "$s_o" "$((s_o - s_u))"
+              diffoscope \
+                --html "out/diffoscope-${bin}.html" \
+                --text "out/diffoscope-${bin}.txt" \
+                --max-report-size 100000000 \
+                "out/upstream/${bin}.norm" \
+                "out/ours/${bin}.norm" || true
+              wc -l "out/diffoscope-${bin}.txt" || true
+            fi
+          done
+
+      - name: Per-section delta (Bar 1a' pattern check)
+        run: |
+          set -uxo pipefail
+          python3 <<'PY'
+          import subprocess, re, sys
+          def sections(p):
+              out = subprocess.check_output(['readelf','-S','-W',p]).decode()
+              d = {}
+              for line in out.splitlines():
+                  m = re.match(r'^\s*\[\s*\d+\]\s+(\S+)\s+\S+\s+[0-9a-f]+\s+[0-9a-f]+\s+([0-9a-f]+)\s', line)
+                  if m: d[m.group(1)] = int(m.group(2),16)
+              return d
+          print("=== per-section delta (upstream - ours) — ${{ matrix.cell.tag }} ===")
+          for bin in ('SBFspot','SBFspotUploadDaemon'):
+              u = sections(f'out/upstream/{bin}')
+              o = sections(f'out/ours/{bin}')
+              print(f"--- {bin} ---")
+              total_up = total_our = 0
+              for k in sorted(set(u)|set(o)):
+                  uv = u.get(k,0); ov = o.get(k,0)
+                  if uv==0 and ov==0: continue
+                  total_up += uv; total_our += ov
+                  d = uv - ov
+                  if abs(d) > 0:
+                      print(f"  {k:<22} {uv:>10} {ov:>10} {d:>+10}")
+              print(f"  {'TOTAL':<22} {total_up:>10} {total_our:>10} {total_up-total_our:>+10}")
+          PY
+
+      - name: Upload per-cell artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase4-${{ matrix.cell.tag }}
+          path: |
+            out/
+            upstream.tar.gz
+          retention-days: 90
+          if-no-files-found: ignore
