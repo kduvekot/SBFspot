@@ -128,16 +128,23 @@ jobs:
           # and emits no build-id. Force both via LDFLAGS so we don't
           # depend on Raspbian linker defaults we don't fully
           # understand yet. Keep the makefile's -s (strip at link).
-          EXTRA_LDFLAGS='-static-libstdc++ -Wl,--build-id=none'
+          #
+          # Phase 3.3: upstream also statically links libbluetooth
+          # (its NEEDED lacks libbluetooth.so.3; its .rodata embeds
+          # the Bluetooth SIG company-name table from libbluetooth.a).
+          # Force the same with -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic
+          # on SBFspot only — the daemon doesn't reference bluetooth.
+          COMMON_LDFLAGS='-s -static-libstdc++ -Wl,--build-id=none'
+          SBFSPOT_LDFLAGS="${COMMON_LDFLAGS} -Wl,-Bstatic -lbluetooth -Wl,-Bdynamic"
           sudo chroot rootfs /bin/sh -euxc "
             cd /src/SBFspot
-            make sqlite LDFLAGS='-s ${EXTRA_LDFLAGS}'
+            make sqlite LDFLAGS='${SBFSPOT_LDFLAGS}'
             file sqlite/bin/SBFspot
             readelf -n sqlite/bin/SBFspot 2>/dev/null | grep -A1 build-id || echo '(no build-id — as intended)'
             readelf -d sqlite/bin/SBFspot | grep NEEDED || true
 
             cd /src/SBFspotUploadDaemon
-            make sqlite LDFLAGS='-s ${EXTRA_LDFLAGS}'
+            make sqlite LDFLAGS='${COMMON_LDFLAGS}'
             file sqlite/bin/SBFspotUploadDaemon
             readelf -d sqlite/bin/SBFspotUploadDaemon | grep NEEDED || true
           "
