@@ -28,34 +28,20 @@ jobs:
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            file curl wine wine32:i386 xvfb scrot imagemagick
+            file curl wine wine32:i386 xvfb scrot xdotool
 
       - name: Download SysGCC installer
         run: |
           set -euxo pipefail
           curl -sSL --fail -o sysgcc.exe "${SYSGCC_URL}"
           ls -lh sysgcc.exe
-          file sysgcc.exe
           sha256sum sysgcc.exe
 
-      - name: Grep installer binary for embedded help strings
-        run: |
-          set -uxo pipefail
-          echo "=== unicode strings (UTF-16LE) matching usage hints ==="
-          strings -e l sysgcc.exe | grep -iE 'usage|silent|/s |/q|/verysilent|/quiet|\-silent|\-quiet|command-line|help' | head -40 || true
-          echo
-          echo "=== ascii strings matching usage hints ==="
-          strings sysgcc.exe | grep -iE 'usage|silent|/s |/q|/verysilent|/quiet|\-silent|\-quiet|command-line|help' | head -40 || true
-          echo
-          echo "=== strings mentioning 'sysprogs' or installer product ==="
-          strings -e l sysgcc.exe | grep -iE 'sysprogs|sysgcc|toolchain|GnuToolchain|raspberry' | head -20 || true
-
-      - name: Run installer (bare, /?, --help, -h) + screenshots
+      - name: Run installer via xdotool automation
         run: |
           set -uxo pipefail
           export WINEPREFIX=$HOME/.wine-sysgcc
           export WINEDEBUG=-all
-          sudo apt-get install -y --no-install-recommends tesseract-ocr || true
           wineboot --init 2>/dev/null || true
           sleep 3
           mkdir -p out
@@ -63,41 +49,77 @@ jobs:
           XVFB_PID=$!
           export DISPLAY=:99
           sleep 2
-          run_and_snap() {
-            local label="$1"; shift
-            echo "=== RUN: wine sysgcc.exe $* ==="
-            (wine sysgcc.exe "$@" > "out/$label.out" 2>&1 &)
-            sleep 10
-            scrot "out/$label.png" 2>&1 || echo "(scrot failed)"
-            wineserver -k 2>/dev/null || true
-            sleep 3
-            echo "--- $label.out content ---"
-            cat "out/$label.out" 2>/dev/null | head -40 || true
-            echo "--- $label.png OCR ---"
-            tesseract "out/$label.png" - 2>/dev/null | head -40 || echo "(ocr failed)"
-            echo
-          }
-          run_and_snap bare           # <-- user request: just execute it
-          run_and_snap help-slashq /?
-          run_and_snap help-dashhelp --help
-          run_and_snap help-dashh -h
+          # Launch installer
+          (wine sysgcc.exe > out/install.log 2>&1 &)
+          # Wait for the window to appear
+          for i in $(seq 1 30); do
+            if xdotool search --name "GNU toolchain" 2>/dev/null | head -1 | grep -q .; then
+              echo "window appeared after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          sleep 3
+          scrot out/01-before.png || true
+          # Focus the installer window
+          WID=$(xdotool search --name "GNU toolchain" | head -1)
+          echo "window id: $WID"
+          xdotool windowactivate --sync "$WID" 2>/dev/null || true
+          sleep 1
+          # Click the "I accept" checkbox (approx. 470, 620 in 1280x1024)
+          xdotool mousemove --sync 470 620
+          sleep 0.5
+          xdotool click 1
+          sleep 1
+          scrot out/02-after-accept.png || true
+          # Click "Install" button (approx. 864, 677)
+          xdotool mousemove --sync 864 677
+          sleep 0.5
+          xdotool click 1
+          sleep 2
+          scrot out/03-after-install-click.png || true
+          # Poll for libstdc++.a up to 10 min
+          echo "=== polling for libstdc++.a ==="
+          for i in $(seq 1 120); do
+            F=$(find "$WINEPREFIX/drive_c/SysGCC" -name 'libstdc++.a' 2>/dev/null | head -1)
+            if [ -n "$F" ]; then
+              echo "libstdc++.a appeared after ${i}×5s = $((i*5))s at: $F"
+              break
+            fi
+            sleep 5
+          done
+          sleep 15  # let the installer finalise after file appears
+          scrot out/04-after-install.png || true
+          wineserver -k 2>/dev/null || true
+          sleep 2
           kill $XVFB_PID 2>/dev/null || true
-          ls -la out/
+          echo "=== SysGCC directory tree (top levels) ==="
+          find "$WINEPREFIX/drive_c/SysGCC" -maxdepth 5 -type d 2>/dev/null | head -30 || echo "SysGCC not installed"
+          echo "=== all libstdc++.a found ==="
+          find "$WINEPREFIX/drive_c/SysGCC" -name 'libstdc++.a' 2>/dev/null -exec ls -la {} \;
 
-      - name: Upload diagnostic artefacts (screenshots + outputs)
+      - name: Collect libstdc++.a
+        run: |
+          set -uxo pipefail
+          export WINEPREFIX=$HOME/.wine-sysgcc
+          LIBA=$(find "$WINEPREFIX/drive_c/SysGCC" -name 'libstdc++.a' 2>/dev/null | head -1)
+          if [ -z "$LIBA" ]; then
+            echo "ERROR: libstdc++.a not installed. See screenshots in artefact."
+            exit 1
+          fi
+          mkdir -p out
+          cp "$LIBA" out/sysgcc_libstdcxx.a
+          ls -la out/sysgcc_libstdcxx.a
+          sha256sum out/sysgcc_libstdcxx.a
+          ar t out/sysgcc_libstdcxx.a 2>/dev/null | wc -l
+
+      - name: Upload libstdc++.a + screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sysgcc-probe-diag
+          name: sysgcc-libstdcxx
           path: out/
           retention-days: 7
-
-      - name: Stop pipeline after diagnostics (until we know the flag)
-        run: |
-          # Short-circuit: we're in investigation mode. Once a working
-          # silent-install flag is identified from screenshots/OCR, revert
-          # this and substitute libstdc++.a extraction.
-          exit 1
 
   build:
     needs: extract
