@@ -116,9 +116,16 @@ jobs:
           # CFLAGS wholesale would drop those variant-specific
           # defines. Single-quoted heredoc preserves backslashes
           # verbatim into the wrapper script file.
+          # Upstream's per-combo prefix scheme (from strings(1) across
+          # all 15 V3.9.12 tarballs):
+          #   arm:   d:\rpi\cross\<codename>\gcc<ver>\arm-linux-gnueabihf\sysroot\usr\include
+          #   arm64: d:\rpi\cross\<codename>64\gcc<ver>\aarch64-linux-gnu\sysroot\usr\include
+          # with codename/ver pinned per codename (buster=8.3.0,
+          # bullseye=10.2.1, bookworm=12.2.0). This probe is
+          # bullseye x arm x sqlite.
           sudo tee rootfs/usr/local/bin/g++ > /dev/null <<'WRAP'
           #!/bin/sh
-          exec /usr/bin/g++ '-fmacro-prefix-map=/usr/include=d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include' "$@"
+          exec /usr/bin/g++ '-fmacro-prefix-map=/usr/include=d:\rpi\cross\bullseye\gcc10.2.1\arm-linux-gnueabihf\sysroot\usr\include' "$@"
           WRAP
           sudo chmod +x rootfs/usr/local/bin/g++
           sudo chroot rootfs /bin/sh -c '/usr/local/bin/g++ --version | head -1; which g++'
