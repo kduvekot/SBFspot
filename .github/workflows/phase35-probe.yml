@@ -1,0 +1,285 @@
+name: Phase 3.5 combo matrix probe (generalise 3.4 technique)
+
+# Tests whether the Phase 3.4 prefix-map wrapper technique achieves
+# Bar 1a'' byte-match across all three matrix axes:
+#   - DB axis:       nosql-arm-bullseye, mariadb-arm-bullseye
+#   - Codename axis: sqlite-arm-buster  (gcc-8.3.0 + GnuTLS)
+#   - Arch axis:     sqlite-arm64-bookworm (aarch64 + Debian sysroot)
+#
+# Focuses on normalised-ELF comparison per binary, not full tarball
+# assembly (variant-specific member lists are Phase 5 work). If all
+# 4 cells produce SBFspot.norm (and SBFspotUploadDaemon.norm where
+# applicable) sha256-equal to upstream, we have strong confidence
+# that the Windows-cross-compile prefix is the only real variable
+# between our pipeline and upstream.
+#
+# Frozen behind .phase35-probe-trigger.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/add-ci-release-pipeline-QKIcZ
+    paths:
+      - .github/workflows/.phase35-probe-trigger
+
+jobs:
+  probe:
+    name: "${{ matrix.cell.id }}"
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cell:
+          - id: nosql-arm-bullseye
+            codename: bullseye
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: nosql
+            make_target: nosql
+            asset_name: sbfspot-nosql-arm-linux-bullseye.tar.gz
+            asset_sha: 1c507d8b07e96c494384f71092549795e80e912b09664c7131c11f5a2c4af4fc
+            prefix: 'd:\rpi\cross\bullseye\gcc10.2.1\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            sbfspot_static: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_static: ''
+
+          - id: mariadb-arm-bullseye
+            codename: bullseye
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: mariadb
+            make_target: mariadb
+            asset_name: sbfspot-mariadb-arm-linux-bullseye.tar.gz
+            asset_sha: c904f3596f78ab424e4cb94a3641262cbdd1167dddebfccfd9582c192de63f0d
+            prefix: 'd:\rpi\cross\bullseye\gcc10.2.1\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian
+            db_pkgs: 'libmariadb-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            # Upstream NEEDED lacks libmariadbclient.so → static-linked too
+            sbfspot_static: '-Wl,-Bstatic -lbluetooth -lmariadbclient -Wl,-Bdynamic'
+            daemon_static: '-Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic'
+
+          - id: sqlite-arm-buster
+            codename: buster
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: sqlite
+            make_target: sqlite
+            asset_name: sbfspot-sqlite-arm-linux-buster.tar.gz
+            asset_sha: 0d4b32bb02df5cf78b7f78d974a92c4a472dd672bd96f6d396215ea72daf1e0c
+            prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
+            mirror: raspbian
+            db_pkgs: 'libsqlite3-dev'
+            # buster libcurl links gnutls, not openssl (upstream daemon NEEDED shows libgnutls.so.30)
+            curl_pkg: 'libcurl4-gnutls-dev'
+            has_daemon: true
+            sbfspot_static: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_static: ''
+
+          - id: sqlite-arm64-bookworm
+            codename: bookworm
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: sqlite
+            make_target: sqlite
+            asset_name: sbfspot-sqlite-arm64-linux-bookworm.tar.gz
+            asset_sha: f35fb21f8298149b2af36d01583b820f5686a2d817c8dd973c286dc5aabff483
+            # arm64 sysroot codename has the "64" suffix in upstream's paths
+            prefix: 'd:\rpi\cross\bookworm64\gcc12.2.0\aarch64-linux-gnu\sysroot\usr\include'
+            mirror: debian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            sbfspot_static: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_static: ''
+
+    env:
+      TAG: V3.9.12
+      UPSTREAM: SBFspot/SBFspot
+
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap xxd binutils file curl jq \
+            debian-archive-keyring
+
+      - name: Fetch Raspbian keyring (if needed)
+        if: matrix.cell.mirror == 'raspbian'
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+
+      - name: Debootstrap rootfs
+        run: |
+          set -euxo pipefail
+          case "${{ matrix.cell.mirror }}" in
+            raspbian)
+              MIRROR="http://archive.raspbian.org/raspbian"
+              KEYRING="$PWD/keyring/raspbian.gpg"
+              ;;
+            debian)
+              # Per Decision 2i: pin Debian to V3.9.12 release date.
+              MIRROR="http://snapshot.debian.org/archive/debian/20250222T000000Z"
+              KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
+              ;;
+          esac
+          sudo debootstrap \
+            --arch=${{ matrix.cell.debarch }} \
+            --variant=minbase \
+            --keyring="$KEYRING" \
+            --include=ca-certificates \
+            "${{ matrix.cell.codename }}" \
+            rootfs \
+            "$MIRROR"
+          file rootfs/bin/ls
+
+      - name: Check out upstream V3.9.12
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.TAG }}
+          path: upstream
+
+      - name: Stage source tree inside rootfs
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a upstream/SBFspot             rootfs/src/
+          sudo cp -a upstream/SBFspotUploadCommon rootfs/src/
+          if [ "${{ matrix.cell.has_daemon }}" = "true" ]; then
+            sudo cp -a upstream/SBFspotUploadDaemon rootfs/src/
+          fi
+
+      - name: Install compiler wrapper with per-combo -fmacro-prefix-map
+        run: |
+          set -euxo pipefail
+          # Single-quoted heredoc preserves backslashes verbatim into the
+          # wrapper script; single quotes inside the wrapper preserve
+          # them through to the real g++.
+          PREFIX='${{ matrix.cell.prefix }}'
+          sudo tee rootfs/usr/local/bin/g++ > /dev/null <<WRAP
+          #!/bin/sh
+          exec /usr/bin/g++ '-fmacro-prefix-map=/usr/include=${PREFIX}' "\$@"
+          WRAP
+          sudo chmod +x rootfs/usr/local/bin/g++
+          sudo chroot rootfs /bin/sh -c 'which g++ && g++ --version | head -1'
+
+      - name: Install build deps in chroot
+        run: |
+          set -euxo pipefail
+          DB_PKGS='${{ matrix.cell.db_pkgs }}'
+          CURL_PKG='${{ matrix.cell.curl_pkg }}'
+          sudo chroot rootfs /bin/sh -euxc "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              g++ make \
+              libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              binutils file \
+              \$DB_PKGS \$CURL_PKG
+            g++ --version | head -1
+          "
+
+      - name: Build SBFspot (+ daemon if applicable)
+        run: |
+          set -euxo pipefail
+          SBFSPOT_LDFLAGS='-s ${{ matrix.cell.sbfspot_static }}'
+          DAEMON_LDFLAGS='-s ${{ matrix.cell.daemon_static }}'
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make $MAKE_TARGET LDFLAGS='$SBFSPOT_LDFLAGS'
+            readelf -d $MAKE_TARGET/bin/SBFspot | grep NEEDED || true
+            if [ \"$HAS_DAEMON\" = \"true\" ]; then
+              cd /src/SBFspotUploadDaemon
+              make $MAKE_TARGET LDFLAGS='$DAEMON_LDFLAGS'
+              readelf -d $MAKE_TARGET/bin/SBFspotUploadDaemon | grep NEEDED || true
+            fi
+          "
+
+      - name: Download upstream asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          url=$(curl -sSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/${TAG}" \
+            | jq -r --arg n "${{ matrix.cell.asset_name }}" \
+                '.assets[] | select(.name==$n) | .browser_download_url')
+          curl -sSL -o upstream.tar.gz "$url"
+          echo "${{ matrix.cell.asset_sha }}  upstream.tar.gz" | sha256sum -c -
+          mkdir -p out/upstream
+          tar -xzf upstream.tar.gz -C out/upstream
+          ls out/upstream
+
+      - name: Normalised-ELF compare
+        run: |
+          set -uxo pipefail
+          mkdir -p out/ours
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          sudo cp "rootfs/src/SBFspot/$MAKE_TARGET/bin/SBFspot" out/ours/SBFspot
+          if [ "$HAS_DAEMON" = "true" ]; then
+            sudo cp "rootfs/src/SBFspotUploadDaemon/$MAKE_TARGET/bin/SBFspotUploadDaemon" \
+                    out/ours/SBFspotUploadDaemon
+          fi
+          sudo chown -R $USER:$USER out/ours
+
+          ALL_MATCH=true
+          BINS="SBFspot"
+          [ "$HAS_DAEMON" = "true" ] && BINS="$BINS SBFspotUploadDaemon"
+          for bin in $BINS; do
+            for side in upstream ours; do
+              cp "out/${side}/${bin}" "out/${side}/${bin}.norm"
+              strip --strip-all "out/${side}/${bin}.norm" || true
+              objcopy \
+                --remove-section=.comment \
+                --remove-section=.note.gnu.build-id \
+                "out/${side}/${bin}.norm" 2>/dev/null || true
+            done
+            sha_u=$(sha256sum "out/upstream/${bin}.norm" | awk '{print $1}')
+            sha_o=$(sha256sum "out/ours/${bin}.norm" | awk '{print $1}')
+            s_u=$(stat -c%s "out/upstream/${bin}.norm")
+            s_o=$(stat -c%s "out/ours/${bin}.norm")
+            if [ "$sha_u" = "$sha_o" ]; then
+              echo "::notice title=${{ matrix.cell.id }} ${bin}::MATCH size=${s_u}"
+              printf '%-30s MATCH  size=%s  sha=%s\n' "$bin" "$s_u" "$sha_u"
+            else
+              ALL_MATCH=false
+              echo "::warning title=${{ matrix.cell.id }} ${bin}::DIFF (delta=$((s_o - s_u)))"
+              printf '%-30s DIFF   upstream=%s ours=%s  delta=%+d\n' \
+                "$bin" "$s_u" "$s_o" "$((s_o - s_u))"
+            fi
+          done
+
+          if [ "$ALL_MATCH" = "true" ]; then
+            echo "CELL VERDICT: Bar 1a'' MATCH for ${{ matrix.cell.id }}"
+          else
+            echo "CELL VERDICT: Bar 1a'' DIFF for ${{ matrix.cell.id }}"
+            exit 1
+          fi
+
+      - name: Upload per-cell artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase35-${{ matrix.cell.id }}-diff
+          path: |
+            out/
+            upstream.tar.gz
+          retention-days: 90
