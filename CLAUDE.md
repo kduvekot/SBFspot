@@ -116,6 +116,7 @@ Accept as irreducible (document, don't fight): gzip `os`/`xfl`/populated `mtime`
 - `docs/phase3.5-baseline.md` — Phase 3.5 end state: cross-combo generalisation probe across DB/codename/arch axes. Revises Phase 3.4's 14-of-15 claim: actually 9 of 15 are clean-match achievable; all 6 bookworm combos carry an additional cross-toolchain irreducible (~10-16 KB) from upstream's private pre-built static libs. Per-combo LDFLAGS table for Phase 5.
 - `docs/phase4-baseline.md` — Phase 4 end state: version back-test V3.9.10/11/12 on arm-bookworm-sqlite. Residual identical across all three tags (−16,384 B SBFspot, −4,096 B daemon). Gate passed; version axis orthogonal to DB/codename/arch. Post-Phase-4 addendum with three libstdc++ rebuild probes (Phase 4c) characterising the irreducible mechanism.
 - `docs/phase5-baseline.md` — Phase 5 end state: 15-combo matrix residual measurement. 7 of 25 binaries byte-identical; 18 with documented residual categories (sysroot drift, NEEDED ordering, bookworm-specific irreducibles, file-layout padding).
+- `docs/phase5d-baseline.md` — Phase 5d end state: SysGCC-toolchain hypothesis tested end-to-end and retired. SysGCC r2's libstdc++.a is byte-identical to Raspbian's package (no-op substitution). SysGCC r1 not publicly reachable. 16 KB arm-bookworm residual unreachable from public data; Phase 7 (upstream-contact) topic.
 - `docs/reproducibility.md` — final remaining diffoscope differences + rationale (Phase 3 exit).
 - `CLAUDE.md` — this file.
 
