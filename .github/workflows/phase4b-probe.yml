@@ -71,18 +71,23 @@ jobs:
       - name: Extract libstdc++.a from image
         run: |
           set -euxo pipefail
-          # Find partition 2 start offset (rootfs). RPi OS layout:
-          # p1 = /boot (fat32 ~512MB), p2 = rootfs (ext4, rest).
-          OFFSET_SECTORS=$(/sbin/fdisk -l raspios.img | awk '/raspios\.img2/ {print $2}')
-          OFFSET_BYTES=$((OFFSET_SECTORS * 512))
-          echo "rootfs partition starts at byte $OFFSET_BYTES"
-          # Use debugfs to dump the file without mounting (avoids
-          # needing loop-device privileges).
-          sudo debugfs -R "dump /usr/lib/arm-linux-gnueabihf/libstdc++.a /tmp/candidate_libstdcxx.a" \
-            -o offset=$OFFSET_BYTES raspios.img 2>&1 | tee /tmp/debugfs.log
+          # losetup -P auto-detects partitions and creates /dev/loopNp{1,2}.
+          LOOP=$(sudo losetup -Pf --show raspios.img)
+          echo "loop device: $LOOP"
+          sudo mkdir -p /mnt/rootfs
+          sudo mount -o ro "${LOOP}p2" /mnt/rootfs
+          ls /mnt/rootfs
+          sudo cp /mnt/rootfs/usr/lib/arm-linux-gnueabihf/libstdc++.a /tmp/candidate_libstdcxx.a
+          # Also grab libstdc++.so.6.0.* for completeness (inspection only)
+          ls -la /mnt/rootfs/usr/lib/arm-linux-gnueabihf/libstdc++* | head -5
+          sudo umount /mnt/rootfs
+          sudo losetup -d "$LOOP"
           ls -la /tmp/candidate_libstdcxx.a
           file /tmp/candidate_libstdcxx.a
           sha256sum /tmp/candidate_libstdcxx.a
+          # Count .o members
+          ar t /tmp/candidate_libstdcxx.a | wc -l
+          ar t /tmp/candidate_libstdcxx.a | head -5
 
       - name: Fetch Raspbian keyring
         run: |
