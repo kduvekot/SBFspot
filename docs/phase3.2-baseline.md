@@ -1,5 +1,18 @@
 # Phase 3.2 baseline — source-rebuild probe + pipeline self-reproducibility proof
 
+> **Correction (Phase 3.3):** This doc's "Finding 2" attributes the
+> 110 KB upstream gap to "Raspbian's build-farm state on 2025-02-22."
+> **That mechanism was wrong.** Phase 3.3 found that
+> (a) most of the gap (94 KB of 110 KB) was just libbluetooth not
+> being statically linked — a single missing linker flag, and
+> (b) the remaining 16 KB is explained by upstream being
+> *cross-compiled from Windows*: the upstream binary embeds eight
+> `d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\...`
+> paths from `__FILE__` macros in boost template instantiations.
+> The same-conclusion-different-mechanism is now in
+> `docs/phase3.3-baseline.md`. Finding 1 (pipeline self-reproducibility)
+> still holds unchanged.
+
 ## Executive summary
 
 The Phase 3.2 probe rebuilt `gcc-12_12.2.0-14+rpi1` from the
