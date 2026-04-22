@@ -76,14 +76,14 @@ jobs:
             asset_sha: 9c9e47237101497e921d2da28b06106b110c44a0cb274f4efafd00e1d1fa0224
             prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
             mirror: raspbian-legacy
-            # libgnutls28-dev + libssl-dev for the -lgnutls/-lssl/-lcrypto
-            # references our LDFLAGS forces to match upstream NEEDED
-            db_pkgs: 'libmariadb-dev libmariadb-dev-compat libgnutls28-dev libssl-dev'
+            # Buster libmariadbclient is built against gnutls (not openssl);
+            # matches upstream NEEDED = libgnutls.so.30 (no libssl/libcrypto).
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat libgnutls28-dev'
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: '-lpthread -Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -lmariadbclient -Wl,-Bdynamic -Wl,--no-as-needed -lgnutls -ldl -lz -lssl -lcrypto -Wl,--as-needed'
-            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -ldl -lz -lssl -lcrypto'
+            sbfspot_extra: '-lpthread -Wl,--as-needed -Wl,-Bstatic -lbluetooth -lboost_date_time -lboost_system -lmariadbclient -Wl,-Bdynamic -Wl,--no-as-needed -lgnutls -ldl -lz -Wl,--as-needed'
+            daemon_extra: '-lpthread -Wl,-Bstatic -lmariadbclient -Wl,-Bdynamic -lgnutls -ldl -lz'
 
           # ========= arm × bullseye (all DBs) =========
           - id: sqlite-arm-bullseye
