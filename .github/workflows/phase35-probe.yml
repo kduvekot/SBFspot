@@ -58,7 +58,9 @@ jobs:
             asset_sha: c904f3596f78ab424e4cb94a3641262cbdd1167dddebfccfd9582c192de63f0d
             prefix: 'd:\rpi\cross\bullseye\gcc10.2.1\arm-linux-gnueabihf\sysroot\usr\include'
             mirror: raspbian
-            db_pkgs: 'libmariadb-dev'
+            # libmariadb-dev-compat provides <mysql/mysql.h>; libmariadb-dev
+            # only provides <mariadb/mysql.h> which the makefile doesn't include.
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             # Upstream NEEDED lacks libmariadbclient.so → static-linked too
@@ -74,7 +76,9 @@ jobs:
             asset_name: sbfspot-sqlite-arm-linux-buster.tar.gz
             asset_sha: 0d4b32bb02df5cf78b7f78d974a92c4a472dd672bd96f6d396215ea72daf1e0c
             prefix: 'd:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include'
-            mirror: raspbian
+            # buster has been dropped from archive.raspbian.org; the
+            # retired-codenames mirror at legacy.raspbian.org still serves it.
+            mirror: raspbian-legacy
             db_pkgs: 'libsqlite3-dev'
             # buster libcurl links gnutls, not openssl (upstream daemon NEEDED shows libgnutls.so.30)
             curl_pkg: 'libcurl4-gnutls-dev'
@@ -82,7 +86,28 @@ jobs:
             sbfspot_static: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_static: ''
 
+          - id: sqlite-arm64-bullseye
+            codename: bullseye
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: sqlite
+            make_target: sqlite
+            asset_name: sbfspot-sqlite-arm64-linux-bullseye.tar.gz
+            asset_sha: 3850a4e0d623f07d1f72b0fef9adb56a44421e0baf9fce2c174062eb6d5da4b9
+            prefix: 'd:\rpi\cross\bullseye64\gcc10.2.1\aarch64-linux-gnu\sysroot\usr\include'
+            mirror: debian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            sbfspot_static: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_static: ''
+
           - id: sqlite-arm64-bookworm
+            # Expected to have a small residual — upstream's arm64-bookworm
+            # binaries carry a second .comment string ("GCC: (Raspbian
+            # 12.2.0-14+rpi1) 12.2.0") alongside the Debian one, indicating
+            # a pre-built static object we don't have (see docs). Kept in
+            # the matrix to confirm-and-quantify that known irreducible.
             codename: bookworm
             debarch: arm64
             triplet: aarch64-linux-gnu
@@ -90,7 +115,6 @@ jobs:
             make_target: sqlite
             asset_name: sbfspot-sqlite-arm64-linux-bookworm.tar.gz
             asset_sha: f35fb21f8298149b2af36d01583b820f5686a2d817c8dd973c286dc5aabff483
-            # arm64 sysroot codename has the "64" suffix in upstream's paths
             prefix: 'd:\rpi\cross\bookworm64\gcc12.2.0\aarch64-linux-gnu\sysroot\usr\include'
             mirror: debian
             db_pkgs: 'libsqlite3-dev'
@@ -112,7 +136,7 @@ jobs:
             debian-archive-keyring
 
       - name: Fetch Raspbian keyring (if needed)
-        if: matrix.cell.mirror == 'raspbian'
+        if: matrix.cell.mirror == 'raspbian' || matrix.cell.mirror == 'raspbian-legacy'
         run: |
           set -euxo pipefail
           mkdir -p keyring
@@ -126,6 +150,13 @@ jobs:
           case "${{ matrix.cell.mirror }}" in
             raspbian)
               MIRROR="http://archive.raspbian.org/raspbian"
+              KEYRING="$PWD/keyring/raspbian.gpg"
+              ;;
+            raspbian-legacy)
+              # buster has been dropped from the live archive; the retired
+              # codename is served from legacy.raspbian.org with the same
+              # key/layout.
+              MIRROR="http://legacy.raspbian.org/raspbian"
               KEYRING="$PWD/keyring/raspbian.gpg"
               ;;
             debian)
@@ -277,12 +308,13 @@ jobs:
             exit 1
           fi
 
-      - name: Upload per-cell artefacts on failure
-        if: failure()
+      - name: Upload per-cell artefacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase35-${{ matrix.cell.id }}-diff
+          name: phase35-${{ matrix.cell.id }}
           path: |
             out/
             upstream.tar.gz
           retention-days: 90
+          if-no-files-found: ignore
