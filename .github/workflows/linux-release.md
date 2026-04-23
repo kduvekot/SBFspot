@@ -612,9 +612,12 @@ bounds-checking versions when the compiler can statically prove a
 buffer size. At runtime, if a check fails, the program calls
 `__chk_fail()` and aborts.
 
-**Why:** catches buffer overflows that would otherwise corrupt memory
-silently. This is the Debian hardening-wrapper default for every
-Debian-built binary since buster; we match it.
+**Why:** catches buffer overflows that would otherwise corrupt
+memory silently. `_FORTIFY_SOURCE=2` has been part of Debian's
+default `CPPFLAGS` via `dpkg-buildflags` for many years (verifiable
+with `DEB_VENDOR=Debian dpkg-buildflags --get CPPFLAGS`); every
+Debian package built with the stock buildflags picks it up. We
+match that policy here.
 
 **Behaviour change risk:** if SBFspot has a latent buffer overflow
 (it's mature C++, we don't expect any), hardened builds abort where
@@ -653,7 +656,18 @@ gain bounds checks; `std::list::front()` aborts on empty list;
 iterator comparisons sanity-check.
 
 **Why:** catches C++ standard-library misuse at runtime instead of
-letting it corrupt memory. Again, Debian default.
+letting it corrupt memory.
+
+**Distro policy note:** unlike the other hardening flags in this
+section, `_GLIBCXX_ASSERTIONS` is **not** in Debian's default
+`dpkg-buildflags` set (verifiable with
+`DEB_VENDOR=Debian dpkg-buildflags --get CPPFLAGS` — it's absent).
+It *is* the default in Fedora and RHEL's GCC packaging and is
+recommended by Red Hat's
+[Developer Program](https://developers.redhat.com/blog/2020/02/11/toward-_fortify_source-parity-between-clang-and-gcc)
+and by the [OpenSSF compiler hardening
+guide](https://best.openssf.org/Compiler-Hardening-Guides/). We
+opt into it here as additional defense in depth.
 
 **Cost:** some code paths get slightly slower. For SBFspot's
 workload (a few dozen solar readings per minute), imperceptible.
@@ -784,14 +798,23 @@ exploit chains.
 **What:** BIND_NOW — resolve *all* dynamic symbols at program
 startup, not lazily on first call.
 
-**Why:** enables "full RELRO" — together with `-z,relro`, means the
-GOT is fully populated and read-only from startup onwards. Lazy
-binding (the default) requires the GOT to stay writable for the
-program's lifetime, which weakens RELRO. Debian hardening default.
+**Why:** enables "full RELRO" — together with `-z,relro`, means
+the GOT is fully populated and read-only from startup onwards.
+Lazy binding (the default) requires the GOT to stay writable for
+the program's lifetime, which weakens RELRO.
+
+**Distro policy note:** BIND_NOW is **not** enabled by default in
+Debian's `dpkg-buildflags` — the hardening feature `bindnow`
+reports `bindnow=no` in `dpkg-buildflags --status`, opt-in only
+via `DEB_BUILD_MAINT_OPTIONS=hardening=+bindnow`. Most security
+guidance (Debian hardening wiki, OpenSSF, Red Hat) recommends
+turning it on explicitly for security-sensitive binaries, which
+is what we do here. Binaries built with the stock Debian
+`dpkg-buildflags` defaults would have only partial RELRO.
 
 Slight startup-time cost (all symbols resolved up front). For a
-long-lived program like SBFspot, this is a one-time cost dwarfed by
-normal operation.
+long-lived program like SBFspot, this is a one-time cost dwarfed
+by normal operation.
 
 ### `-Wl,-z,noexecstack`
 
