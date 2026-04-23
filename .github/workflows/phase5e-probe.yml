@@ -1,25 +1,19 @@
 name: Phase 5e.1 hardened pipeline (modern best practices)
 
-# Applies modern hardening + reproducibility flags to all 15
-# upstream V3.9.12 combos. We no longer chase upstream byte-match;
-# the upstream-asset compare remains in the workflow only as a
-# size-delta reference.
+# Modern hardened rebuild of all 15 upstream V3.9.12 tarballs.
 #
-# Compile (via /usr/local/bin/g++ wrapper):
-#   -D_FORTIFY_SOURCE=2 -fstack-protector-strong
-#   -D_GLIBCXX_ASSERTIONS -fPIE
-#   -fmacro-prefix-map=/usr/include=<upstream prefix>  (__FILE__ stability)
+# Full rationale for every compile flag, link flag, and per-cell
+# matrix value is in the companion doc:
 #
-# Link:
-#   -pie  -Wl,-z,relro  -Wl,-z,now  -Wl,-z,noexecstack
-#   -Wl,--build-id=sha1
-#   libbluetooth.a static-linked, rebuilt from the cell's distro
-#   bluez source with -fPIC (so armhf PIE doesn't emit TEXTREL).
-#   libbluetooth.so.3 therefore stays out of NEEDED, matching
-#   upstream's runtime-dep surface; no new package required on
-#   target systems.
+#     .github/workflows/phase5e-probe.md
 #
-# Frozen behind .phase5e-probe-trigger.
+# …including what we tried and dropped (dynamic libbluetooth,
+# SysGCC, non-PIE armhf) and a glossary for concepts like PIC,
+# TEXTREL, RELRO, BIND_NOW.
+#
+# Frozen behind .phase5e-probe-trigger: this workflow only runs on
+# push when that trigger file changes. `workflow_dispatch:` also
+# enabled for on-demand UI runs.
 
 on:
   workflow_dispatch:
