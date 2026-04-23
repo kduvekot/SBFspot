@@ -46,7 +46,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm-buster
@@ -62,7 +62,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm-buster
@@ -80,7 +80,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
@@ -98,7 +98,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm-bullseye
@@ -114,7 +114,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm-bullseye
@@ -130,7 +130,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
@@ -148,7 +148,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm-bookworm
@@ -164,7 +164,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm-bookworm
@@ -180,7 +180,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
@@ -198,7 +198,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm64-bullseye
@@ -214,7 +214,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm64-bullseye
@@ -230,7 +230,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
@@ -248,7 +248,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm64-bookworm
@@ -264,7 +264,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm64-bookworm
@@ -280,7 +280,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s -Wl,--as-needed'
+            common_ldflags: '-Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
@@ -369,6 +369,10 @@ jobs:
           # - _GLIBCXX_ASSERTIONS: libstdc++ runtime checks
           # - fPIE: position-independent executable (enables ASLR)
           # Prefix-map retained to normalise __FILE__ strings.
+          # -g: emit DWARF debug info so we can split into .debug
+          # sidecars in the post-build step. Doesn't affect the loadable
+          # binary: debug sections are stripped out before we ship. See
+          # phase5e-probe.md §3 step 12 (debuginfo split) and §9.
           sudo tee rootfs/usr/local/bin/g++ > /dev/null <<WRAP
           #!/bin/sh
           exec /usr/bin/g++ \
@@ -377,6 +381,7 @@ jobs:
             -fstack-protector-strong \
             -D_GLIBCXX_ASSERTIONS \
             -fPIE \
+            -g \
             "\$@"
           WRAP
           sudo chmod +x rootfs/usr/local/bin/g++
@@ -449,6 +454,43 @@ jobs:
               make $MAKE_TARGET LDFLAGS='$DAEMON_LDFLAGS'
               file $MAKE_TARGET/bin/SBFspotUploadDaemon
               readelf -d $MAKE_TARGET/bin/SBFspotUploadDaemon | grep NEEDED || true
+            fi
+          "
+
+      - name: Split debug info into .debug sidecars
+        # The build step produced unstripped binaries (LDFLAGS no longer
+        # has -s, and the g++ wrapper appends -g). Now:
+        #   1) --only-keep-debug: extract DWARF into $BIN.debug
+        #   2) --strip-unneeded: strip the binary of debug + symbols
+        #      but keep dynamic-linker-needed symbols
+        #   3) --add-gnu-debuglink: embed a .gnu_debuglink section
+        #      pointing gdb/debuginfod at the sidecar
+        # The main tarball ships the stripped binary; a separate
+        # .debug.tar.gz artefact ships the sidecars. See §3 step 12
+        # and §9 of phase5e-probe.md.
+        run: |
+          set -euxo pipefail
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot/${MAKE_TARGET}/bin
+            for BIN in SBFspot; do
+              objcopy --only-keep-debug \"\$BIN\" \"\$BIN.debug\"
+              objcopy --strip-unneeded      \"\$BIN\"
+              objcopy --add-gnu-debuglink=\"\$BIN.debug\" \"\$BIN\"
+              chmod 0644 \"\$BIN.debug\"
+              ls -la \"\$BIN\" \"\$BIN.debug\"
+              readelf -S \"\$BIN\" | grep -E 'gnu_debuglink|debug_' | head
+            done
+            if [ \"${HAS_DAEMON}\" = \"true\" ]; then
+              cd /src/SBFspotUploadDaemon/${MAKE_TARGET}/bin
+              for BIN in SBFspotUploadDaemon; do
+                objcopy --only-keep-debug \"\$BIN\" \"\$BIN.debug\"
+                objcopy --strip-unneeded      \"\$BIN\"
+                objcopy --add-gnu-debuglink=\"\$BIN.debug\" \"\$BIN\"
+                chmod 0644 \"\$BIN.debug\"
+                ls -la \"\$BIN\" \"\$BIN.debug\"
+              done
             fi
           "
 
@@ -608,6 +650,30 @@ jobs:
           ls -la "out/tarballs/${OUTNAME}"
           sha256sum "out/tarballs/${OUTNAME}"
           tar -tvf "out/tarballs/${OUTNAME}"
+          # Companion .debug.tar.gz: just the sidecars, same reproducible
+          # tar/gzip convention as above. Consumers who want symbolication
+          # (gdb, debuginfod) grab this; end users never need to.
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          DEBUG_OUTNAME="sbfspot-${DB}-${ARCH}-linux-${CODENAME}.debug.tar.gz"
+          DEBUG_STAGE="$(mktemp -d)/sbfspot-debug"
+          mkdir -p "$DEBUG_STAGE"
+          sudo cp "rootfs/src/SBFspot/${MAKE_TARGET}/bin/SBFspot.debug" "$DEBUG_STAGE/"
+          if [ "$HAS_DAEMON" = "true" ]; then
+            sudo cp "rootfs/src/SBFspotUploadDaemon/${MAKE_TARGET}/bin/SBFspotUploadDaemon.debug" "$DEBUG_STAGE/"
+          fi
+          sudo chown -R "$USER:$USER" "$DEBUG_STAGE"
+          chmod 0644 "$DEBUG_STAGE"/*.debug
+          ( cd "$DEBUG_STAGE" && tar \
+              --sort=name \
+              --owner=0 --group=0 --numeric-owner \
+              --mtime="@${SOURCE_DATE_EPOCH}" \
+              --format=ustar \
+              -cf - -- * ) \
+            | gzip -n > "out/tarballs/${DEBUG_OUTNAME}"
+          echo "=== ${DEBUG_OUTNAME} built ==="
+          ls -la "out/tarballs/${DEBUG_OUTNAME}"
+          sha256sum "out/tarballs/${DEBUG_OUTNAME}"
+          tar -tvf "out/tarballs/${DEBUG_OUTNAME}"
 
       - name: Upload per-cell artefacts
         if: always()
