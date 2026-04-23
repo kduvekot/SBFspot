@@ -13,8 +13,11 @@ name: Phase 5e.1 hardened pipeline (modern best practices)
 # Link:
 #   -pie  -Wl,-z,relro  -Wl,-z,now  -Wl,-z,noexecstack
 #   -Wl,--build-id=sha1
-#   libbluetooth / libmariadbclient linked dynamically (no static
-#   non-PIC archives → no TEXTREL on armhf PIE).
+#   libbluetooth.a static-linked, rebuilt from the cell's distro
+#   bluez source with -fPIC (so armhf PIE doesn't emit TEXTREL).
+#   libbluetooth.so.3 therefore stays out of NEEDED, matching
+#   upstream's runtime-dep surface; no new package required on
+#   target systems.
 #
 # Frozen behind .phase5e-probe-trigger.
 
@@ -50,7 +53,7 @@ jobs:
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm-buster
             codename: buster
@@ -66,7 +69,7 @@ jobs:
             curl_pkg: ''
             has_daemon: false
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm-buster
             codename: buster
@@ -84,7 +87,7 @@ jobs:
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
           # ========= arm × bullseye (all DBs) =========
@@ -102,7 +105,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm-bullseye
             codename: bullseye
@@ -118,7 +121,7 @@ jobs:
             curl_pkg: ''
             has_daemon: false
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm-bullseye
             codename: bullseye
@@ -134,7 +137,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
           # ========= arm × bookworm (all DBs) =========
@@ -152,7 +155,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm-bookworm
             codename: bookworm
@@ -168,7 +171,7 @@ jobs:
             curl_pkg: ''
             has_daemon: false
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm-bookworm
             codename: bookworm
@@ -184,7 +187,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
           # ========= arm64 × bullseye (all DBs) =========
@@ -202,7 +205,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm64-bullseye
             codename: bullseye
@@ -218,7 +221,7 @@ jobs:
             curl_pkg: ''
             has_daemon: false
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm64-bullseye
             codename: bullseye
@@ -234,7 +237,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
           # ========= arm64 × bookworm (all DBs) — dual-.comment residual expected =========
@@ -252,7 +255,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm64-bookworm
             codename: bookworm
@@ -268,7 +271,7 @@ jobs:
             curl_pkg: ''
             has_daemon: false
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm64-bookworm
             codename: bookworm
@@ -284,7 +287,7 @@ jobs:
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
             common_ldflags: '-s'
-            sbfspot_extra: ''
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
     env:
@@ -385,6 +388,34 @@ jobs:
               binutils file \
               ${DB_PKGS} ${CURL_PKG}
             g++ --version | head -1
+          "
+
+      - name: Build PIC libbluetooth.a from distro bluez source
+        run: |
+          set -euxo pipefail
+          TRIPLET='${{ matrix.cell.triplet }}'
+          # Debian/Raspbian ship libbluetooth.a in libbluetooth-dev but
+          # compile it without -fPIC. Static-linking that into a PIE
+          # binary emits DT_TEXTREL on armhf. Rebuild the same 3 source
+          # files Debian's libbluetooth.la uses (Makefile.am:
+          # lib_libbluetooth_la_SOURCES = $lib_headers $lib_sources,
+          # where lib_sources = lib/bluetooth.c lib/hci.c lib/sdp.c),
+          # compiled with -fPIC, and install over the stock .a.
+          sudo chroot rootfs /bin/sh -euxc "
+            # Enable deb-src so apt-get source works
+            sed -n 's/^deb /deb-src /p' /etc/apt/sources.list >> /etc/apt/sources.list
+            apt-get update -qq
+            apt-get install -y --no-install-recommends dpkg-dev
+            mkdir -p /tmp/bluez && cd /tmp/bluez
+            apt-get source bluez
+            cd bluez-*/lib
+            gcc -fPIC -O2 -Wall -I. -c bluetooth.c hci.c sdp.c
+            ar rcs libbluetooth.a bluetooth.o hci.o sdp.o
+            install -m 0644 libbluetooth.a /usr/lib/$TRIPLET/libbluetooth.a
+            echo '=== verify PIC (should show GOT/GOTOFF relocs) ==='
+            readelf -r /usr/lib/$TRIPLET/libbluetooth.a 2>/dev/null \
+              | grep -E 'R_ARM_GOT|R_AARCH64_.*GOT|R_ARM_GOTOFF' \
+              | head -3 || echo 'no GOT relocs found — check -fPIC applied'
           "
 
       - name: Build SBFspot (+ daemon if applicable)
