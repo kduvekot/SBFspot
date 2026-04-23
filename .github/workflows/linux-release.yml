@@ -488,6 +488,82 @@ jobs:
           sudo chown -R "$USER:$USER" out/bin
           ls -la out/bin
 
+      - name: Capture SBOM (installed packages + .deb SHA256s)
+        # Records the package set relevant to the build: the
+        # runtime-linked libraries (resolved from the binary's NEEDED
+        # entries) plus the explicitly-installed build tools + dev
+        # packages. For each: name, version, architecture, SHA256 of
+        # the .deb that was installed from the apt cache.
+        #
+        # This is a surgical SBOM: ~15 packages per cell, not the
+        # ~100 packages debootstrap pulls in. The 85 infrastructure
+        # packages (apt, dpkg, coreutils, bash, …) are excluded
+        # because they have no effect on the compiled binary.
+        #
+        # Retrievability story: for Debian-originated packages,
+        # snapshot.debian.org preserves source + binary forever —
+        # given the version string here, anyone can fetch the exact
+        # source or .deb long after Raspbian's live archive has
+        # moved on. For Raspbian-patched (+rpi*) packages the SHA256
+        # acts as a fingerprint so third-party archives or local
+        # copies can be verified. See linux-release.md §9.
+        run: |
+          set -euxo pipefail
+          DB='${{ matrix.cell.db }}'
+          ARCH='${{ matrix.cell.debarch }}'
+          [ "$ARCH" = "armhf" ] && ARCH=arm
+          CODENAME='${{ matrix.cell.codename }}'
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          SBOM_FILE="out/tarballs/sbfspot-${DB}-${ARCH}-linux-${CODENAME}.packages.list"
+          mkdir -p out/tarballs
+          BINARIES="rootfs/src/SBFspot/${MAKE_TARGET}/bin/SBFspot"
+          if [ "$HAS_DAEMON" = "true" ]; then
+            BINARIES="$BINARIES rootfs/src/SBFspotUploadDaemon/${MAKE_TARGET}/bin/SBFspotUploadDaemon"
+          fi
+          # 1) Resolve NEEDED sonames → filesystem path → owning package
+          runtime_pkgs=$(
+            for b in $BINARIES; do
+              readelf -d "$b" | awk -F'[][]' '/NEEDED/ {print $2}'
+            done | sort -u | while read -r so; do
+              path=$(sudo chroot rootfs sh -c \
+                "ldconfig -p 2>/dev/null | awk -v n='$so' '"'$1==n {print $NF; exit}'"'" || true)
+              [ -z "$path" ] && continue
+              sudo chroot rootfs dpkg -S "$path" 2>/dev/null | head -1 | cut -d: -f1
+            done | sort -u
+          )
+          # 2) Build-time + dev packages (may not appear in NEEDED)
+          build_pkgs="g++ make binutils dpkg-dev libbluetooth-dev \
+            libboost-date-time-dev libboost-system-dev bluez \
+            ${{ matrix.cell.db_pkgs }} ${{ matrix.cell.curl_pkg }}"
+          all_pkgs=$( { printf '%s\n' $runtime_pkgs; printf '%s\n' $build_pkgs; } \
+                      | grep -v '^$' | sort -u )
+          # 3) Emit SBOM
+          {
+            echo "# SBFspot SBOM: ${DB} × ${ARCH} × ${CODENAME}"
+            echo "# SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH} ($(date -u -d @${SOURCE_DATE_EPOCH} +%Y-%m-%dT%H:%M:%SZ))"
+            echo "# Format: <package>\t<version>\t<architecture>\t<deb_sha256>"
+            echo ""
+            for pkg in $all_pkgs; do
+              info=$(sudo chroot rootfs dpkg-query -W \
+                -f='${Package}\t${Version}\t${Architecture}\n' "$pkg" 2>/dev/null || true)
+              [ -z "$info" ] && continue
+              pkg_name=$(echo "$info" | cut -f1)
+              ver=$(echo "$info"     | cut -f2)
+              arch_f=$(echo "$info"  | cut -f3)
+              cached=$(sudo chroot rootfs sh -c \
+                "ls /var/cache/apt/archives/${pkg_name}_*_${arch_f}.deb 2>/dev/null | head -1" || true)
+              if [ -n "$cached" ]; then
+                sha=$(sudo chroot rootfs sha256sum "$cached" | cut -d' ' -f1)
+              else
+                sha="(not-cached)"
+              fi
+              printf "%s\t%s\t%s\t%s\n" "$pkg_name" "$ver" "$arch_f" "$sha"
+            done | sort
+          } > "$SBOM_FILE"
+          echo "=== SBOM written: $SBOM_FILE ==="
+          cat "$SBOM_FILE"
+
       - name: Assemble reproducible release tarball
         # Builds sbfspot-<db>-<arch>-linux-<codename>.tar.gz (main) and
         # sbfspot-<db>-<arch>-linux-<codename>.debug.tar.gz (DWARF
@@ -588,10 +664,11 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
 
-      - name: Attach tarballs to GitHub Release (tag push only)
+      - name: Attach tarballs + SBOMs to GitHub Release (tag push only)
         if: startsWith(github.ref, 'refs/tags/V3.9.')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             out/tarballs/*.tar.gz
+            out/tarballs/*.packages.list
           fail_on_unmatched_files: true

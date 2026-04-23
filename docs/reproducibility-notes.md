@@ -26,6 +26,34 @@ for the full mechanism description and the known limitation on
 arm cells (live Raspbian archive — long-term drift modulo
 security updates).
 
+## Per-release SBOM
+
+Each release also ships 15 **Software Bills of Materials** —
+one per cell, as
+`sbfspot-<db>-<arch>-linux-<codename>.packages.list`. Each file
+records, for the ~15 packages that actually affect the build:
+
+- package name
+- version
+- architecture
+- SHA256 of the installed `.deb`
+
+Two categories of packages captured:
+
+1. Libraries the built binary dynamically links against (resolved
+   from `readelf -d`'s NEEDED entries through the chroot's
+   `ldconfig` and `dpkg -S`).
+2. Build-time tooling and `-dev` packages (g++, binutils, make,
+   dpkg-dev, libbluetooth-dev, libboost-*-dev, libsqlite3-dev /
+   libmariadb-dev, libcurl-dev, bluez source).
+
+Audit model: given the version string, Debian-originated packages
+stay retrievable forever via `snapshot.debian.org`. For Raspbian-
+patched (`+rpi*`) packages — typically gcc/libstdc++/libgcc — the
+`.deb` SHA256 acts as a fingerprint for verifying any recovered
+copy (third-party mirrors, user caches, backups) against the
+exact bytes that went into the build.
+
 ## Canonical SHA256s — reference V3.9.12 rebuild
 
 The pipeline was exercised against the V3.9.12 tag during

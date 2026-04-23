@@ -190,21 +190,24 @@ Release-attachment logic lives in a single conditional step near
 the end of the workflow:
 
 ```yaml
-- name: Attach tarballs to GitHub Release (tag push only)
+- name: Attach tarballs + SBOMs to GitHub Release (tag push only)
   if: startsWith(github.ref, 'refs/tags/V3.9.')
   uses: softprops/action-gh-release@v2
   with:
-    files: out/tarballs/*.tar.gz
+    files: |
+      out/tarballs/*.tar.gz
+      out/tarballs/*.packages.list
 ```
 
 So a V3.9.13 tag push causes the workflow to run *and* automatically
-upload its 30 tarballs to the V3.9.13 Release page. Every other
-trigger produces the same tarballs, but they stay as workflow-run
-artefacts (90-day retention, not publicly linked).
+upload its 45 artefacts (15 main tarballs + 15 debug sidecars + 15
+package SBOMs) to the V3.9.13 Release page. Every other trigger
+produces the same artefacts, but they stay as workflow-run artefacts
+(90-day retention, not publicly linked).
 
 ## 3. Step-by-step walkthrough
 
-Every cell runs the same 16 steps. Here's what each one does, in
+Every cell runs the same 17 steps. Here's what each one does, in
 order, in plain language. Flag rationale is in sections 4–6; this
 section is just "what happens when."
 
@@ -355,7 +358,7 @@ After this:
   runnable, usable for symbolication.
 
 The stripped binary is what goes into the main tarball. The
-sidecars go into a companion `.debug.tar.gz` (step 14). If a user
+sidecars go into a companion `.debug.tar.gz` (step 15). If a user
 ever core-dumps in production, an auditor can line up the two and
 get full source-line backtraces. See
 [§9](#9-reproducibility-guarantees) for the reproducibility
@@ -392,7 +395,45 @@ applicable — the daemon out of `rootfs/src/<target>/bin/` into
 from step 11 stay inside the chroot; they're pulled in directly by
 the assembly step.
 
-### Step 14: `Assemble reproducible release tarball`
+### Step 14: `Capture SBOM (installed packages + .deb SHA256s)`
+
+Writes a per-cell bill of materials to
+`out/tarballs/sbfspot-<db>-<arch>-linux-<codename>.packages.list`.
+Format is one line per package:
+
+```
+<package>\t<version>\t<architecture>\t<sha256-of-.deb>
+```
+
+Two sources of package names:
+
+1. **Runtime-linked libraries.** For each `NEEDED` entry in the
+   built binaries (`readelf -d`), resolve the soname to a filesystem
+   path inside the chroot via `ldconfig -p`, then ask
+   `dpkg -S <path>` which package owns it. Union across SBFspot and
+   SBFspotUploadDaemon (where applicable).
+2. **Explicitly-installed build tooling:** `g++`, `make`,
+   `binutils`, `dpkg-dev`, plus the per-cell `-dev` packages and
+   `bluez` (whose source the PIC libbluetooth rebuild uses).
+
+Then for each package in the union:
+- `dpkg-query` for exact version and architecture.
+- Locate the cached `.deb` in `/var/cache/apt/archives/` and
+  compute SHA256.
+
+Total ~15 lines per cell — not the ~100 packages `debootstrap`
+pulls in wholesale, just the ones that actually affect the output.
+
+**Why the .deb SHA256 matters.** For Debian-originated packages
+the version string alone is enough to retrieve the exact `.deb`
+(or the source) from `snapshot.debian.org` indefinitely. For
+Raspbian-patched (`+rpi*`) packages, the live archive deletes
+superseded versions, so the SHA256 is the only way to later
+verify a recovered `.deb` (from a third-party mirror, a
+user's local cache, a backup) is bit-identical to what the
+build used.
+
+### Step 15: `Assemble reproducible release tarball`
 
 Takes the fresh binary (+ daemon where applicable) + the
 non-binary data files from the tagged source tree, stages them in
@@ -437,24 +478,27 @@ just the `.debug` files produced by step 11
 reproducible tar+gzip treatment. Consumers who want symbolication
 grab this alongside the main tarball; end users never need to.
 
-### Step 15: `Upload per-cell artefacts`
+### Step 16: `Upload per-cell artefacts`
 
 Tars up `./out/` (which has `out/bin/`, `out/tarballs/`) as an
 artefact named `sbfspot-<cell-id>`.
 `actions/upload-artifact@v7` handles the upload. 90-day retention.
 
-### Step 16: `Attach tarballs to GitHub Release` (tag push only)
+### Step 17: `Attach tarballs + SBOMs to GitHub Release` (tag push only)
 
 Conditional on `github.ref` starting with `refs/tags/V3.9.` —
 i.e. this step only runs when the workflow was triggered by a tag
 push matching the release-tag pattern. Uses
-`softprops/action-gh-release@v2` to attach `out/tarballs/*.tar.gz`
-(both the main 15 and the debug sidecar 15) as assets on the
-matching GitHub Release.
+`softprops/action-gh-release@v2` to attach
+`out/tarballs/*.tar.gz` (main tarballs + debug sidecars) plus
+`out/tarballs/*.packages.list` (SBOMs from step 14) as assets on
+the matching GitHub Release. 45 files total: 15 main + 15 debug +
+15 SBOM.
 
 On master pushes, PRs, and manual dispatches, this step is a
-no-op. The tarballs still exist as workflow-run artefacts
-(step 15); they just don't get promoted to a public Release.
+no-op. The tarballs and SBOMs still exist as workflow-run
+artefacts (step 16); they just don't get promoted to a public
+Release.
 
 That's the whole pipeline. The next three sections explain *why*
 each compile/link/libbluetooth choice is what it is.
@@ -1044,6 +1088,18 @@ are fully locked down against Debian drift.
 **No `git`-state noise.** `actions/checkout` always produces the
 exact commit tree that triggered the run. For a tag push that's
 the tagged snapshot; same bytes forever.
+
+**Per-cell SBOM.** Step 14 records name, version, architecture,
+and `.deb` SHA256 for every package that actually affects the
+build (runtime-linked libraries from the binary's NEEDED entries
+plus the explicit build-tool install list — ~15 packages per
+cell). Shipped on the Release as
+`sbfspot-<cell-id>.packages.list`. Given the version string,
+Debian-originated packages are retrievable forever from
+`snapshot.debian.org` — both source and binary. For Raspbian-
+patched (`+rpi*`) packages, the SHA256 lets an auditor verify a
+recovered `.deb` from third-party mirrors or local caches even
+after `archive.raspbian.org` has moved on.
 
 ### Known limitation: live Raspbian archive
 
