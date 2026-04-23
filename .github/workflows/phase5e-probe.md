@@ -876,7 +876,99 @@ Full list in the YAML; not repeated here for brevity.
 
 ## 8. Things we tried and dropped
 
-*TBD*
+If you find yourself thinking "why don't we just…", check here
+first. Each entry links to the run that proved it wrong or the
+phase doc with the full analysis.
+
+### Dynamic libbluetooth everywhere (5e.1b)
+
+**Idea:** drop `-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic`, let
+`libbluetooth.so.3` be a dynamic dep.
+
+**Result:** works, no TEXTREL, no hardening gap. But
+`libbluetooth.so.3` appears in NEEDED. Users on Raspberry Pi OS
+Lite without `bluez` installed can't run the binary. Sbfspot-config
+doesn't install bluez. Functional regression vs upstream. Rejected
+in favour of the PIC rebuild.
+
+**Run:** `24806180451` (all 15 cells green, but NEEDED regression).
+
+### Non-PIE on armhf to match upstream (option A of the PIE decision)
+
+**Idea:** drop `-fPIE`/`-pie` on armhf cells, since upstream's armhf
+binaries are non-PIE anyway. No TEXTREL, no PIC rebuild needed, true
+drop-in.
+
+**Why rejected:** PIE is the biggest single hardening win in modern
+Linux; dropping it to avoid a build-time workaround felt backwards.
+PIE has zero user-visible behaviour change — only a security-posture
+change. We decided modernisation beats byte-for-byte upstream match.
+
+**Reasoning captured in conversation preceding 5e.1c commit.**
+
+### Accept TEXTREL on armhf (option C)
+
+**Idea:** keep PIE everywhere, keep static non-PIC libbluetooth,
+accept that armhf binaries have `FLAGS: TEXTREL BIND_NOW`.
+
+**Why rejected:** `checksec` and every other hardening auditor
+would flag it. Defeats the point of going PIE.
+
+### Silent install of SysGCC for upstream's toolchain (Phase 5d)
+
+**Idea:** upstream uses some Windows cross-toolchain (probably
+SysGCC Raspberry). If we can extract their `libstdc++.a` and use
+it, the arm-bookworm residual closes.
+
+**What we did:** ran the SysGCC installer under Wine + Xvfb +
+xdotool GUI automation in CI, extracted its `libstdc++.a`.
+
+**Result:** SysGCC r2's `libstdc++.a` is byte-identical to Raspbian's
+shipped version. Substituting it was a no-op. SysGCC r1 is not
+publicly reachable. Upstream's specific build of gcc remains private.
+
+**Phase retired.** See [`../docs/phase5d-baseline.md`](../docs/phase5d-baseline.md).
+
+### Three libstdc++ rebuild flags (Phase 4c)
+
+**Idea:** maybe the arm-bookworm residual is just a specific gcc
+rebuild flag of libstdc++ we haven't tried. Probed three candidates.
+
+**Results:**
+- `-fasynchronous-unwind-tables`: closes 4 KB but grows the wrong
+  section (`.ARM.exidx` not `.ARM.extab`). Doesn't match.
+- `-D_GLIBCXX_ASSERTIONS` on libstdc++: overshoots by +24 KB.
+- `-fnon-call-exceptions`: overshoots by +61 KB.
+
+**Conclusion:** no single well-known gcc flag closes the residual.
+The difference is baked into upstream's private Canadian-cross gcc
+build. See [`../docs/phase4-baseline.md`](../docs/phase4-baseline.md)
+addendum.
+
+### Rootfs caching via `actions/cache`
+
+**Idea:** each cell spends ~90 s on debootstrap. If we cache the
+rootfs tar across runs, we could cut matrix time ~20 %.
+
+**Why not yet:** we prioritised correctness + hardening over speed.
+Caching is listed as a Phase 5e.2 follow-up. The risk is subtle —
+a cached rootfs can go stale against the live Raspbian archive and
+introduce non-obvious package-version drift. We'd need a deliberate
+cache-invalidation strategy.
+
+### `-flto`, `-march=native`, `-O3`
+
+See §4 "Flags we don't apply." Short version: no meaningful gain,
+risk of breakage, not worth it.
+
+### Per-variant tarball assembly (Phase 5e.2 — not yet done)
+
+This workflow measures per-binary. It does **not** yet re-assemble
+the full tarball (tar + gzip) with the right member list per
+variant. That's planned as Phase 5e.2: reproduce upstream's
+`sbfspot-sqlite-arm-linux-bookworm.tar.gz` exactly, member-by-member,
+with `tar --sort=name --owner=0 --group=0 --numeric-owner` and a
+per-variant member-list table.
 
 ## 9. Glossary
 
