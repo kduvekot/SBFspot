@@ -133,16 +133,24 @@ the host's. It's isolation without the overhead of a full container.
 
 `debootstrap` pulls packages from a mirror URL. We use three:
 
-| Mirror | For which cells | Why |
+| Mirror | For which cells | Notes |
 |---|---|---|
-| `http://archive.raspbian.org/raspbian` | arm × {bullseye, bookworm} | Current Raspbian archive. Upstream's armhf binaries are Raspbian-flavoured (`.comment` says `GCC: (Raspbian X+rpi1)`), so we use Raspbian too. |
-| `http://legacy.raspbian.org/raspbian` | arm × buster | Raspbian dropped buster from the live archive; legacy mirror still serves it. |
-| `http://snapshot.debian.org/archive/debian/20250222T000000Z` | arm64 × all | Debian's snapshot service, pinned to the date upstream released V3.9.12. Arm64 binaries are Debian, not Raspbian. |
+| `http://archive.raspbian.org/raspbian` | arm × {bullseye, bookworm} | Current Raspbian archive. armhf binaries are Raspbian-flavoured (`.comment` carries `GCC: (Raspbian X+rpi1)`). |
+| `http://legacy.raspbian.org/raspbian` | arm × buster | Raspbian dropped buster from the live archive; legacy mirror serves the frozen final state. |
+| `http://snapshot.debian.org/archive/debian/<YYYYMMDD>T000000Z` | arm64 × all | Debian's snapshot service, pinned to the UTC-day boundary of the triggering commit's timestamp. Each tagged release builds against a coherent Debian snapshot from its own day. |
 
-Raspbian doesn't run a functional snapshot service, so the live
-archive's natural drift is accepted. If bookworm library versions
-shift, the binaries shift with them — the same property upstream's
-hand builds had when the maintainer rebuilt on a newer day.
+The arm64 snapshot pin is **derived at run time**, not hardcoded —
+see step 5. A V3.9.12 build resolves to
+`20250218T000000Z`; a V3.9.13 build a few months later will
+automatically pick the snapshot for that commit's day. No per-
+release maintenance.
+
+Raspbian doesn't run a functional snapshot service, so the arm
+cells use the live archive and accept its natural drift. If
+bookworm library versions shift, the arm binaries shift with them.
+The per-cell SBOM (step 14) records exactly which package
+versions were installed, so the state at build time remains
+auditable even if the archive has moved on.
 
 ### The 15-cell matrix
 
@@ -218,42 +226,54 @@ Runs on the outer runner (not the chroot). Installs `debootstrap`,
 Everything we need to *build* a chroot and later *compare* binaries
 lives here.
 
-### Step 2: `Fetch Raspbian keyring` (conditional)
-
-Runs only for arm cells (which use Raspbian mirrors). Debootstrap
-won't trust a Raspbian mirror unless we give it Raspbian's signing
-key. Downloads `raspbian.public.key`, dearmors it into a binary
-keyring file that debootstrap accepts.
-
-### Step 3: `Debootstrap rootfs`
-
-This is where the chroot gets built. Picks the right mirror URL +
-keyring based on `matrix.cell.mirror` (`raspbian` / `raspbian-legacy`
-/ `debian`) and runs debootstrap. When it finishes, `./rootfs/` is a
-minimal bookworm-armhf (or whatever the cell is) install.
-
-This step takes ~60–90 s — the bulk of each cell's runtime.
-
-### Step 4: `Check out source`
+### Step 2: `Check out source`
 
 Uses `actions/checkout@v6` to clone the repository at whatever ref
 triggered the run (a V3.9.* tag, a master commit, or a PR HEAD)
 into `./src/`. For a tag push the tree is the tagged snapshot; for
 other triggers it's the current branch state.
 
-### Step 5: `Derive SOURCE_DATE_EPOCH from triggering commit`
+### Step 3: `Derive SOURCE_DATE_EPOCH + snapshot date from triggering commit`
 
 Reads the commit timestamp of whatever commit triggered the run
-(`git -C src log -1 --pretty=%ct`) and exports it to `$GITHUB_ENV`
-so every subsequent step sees it in the environment.
+(`git -C src log -1 --pretty=%ct`) and computes two values into
+`$GITHUB_ENV`:
+
+- `SOURCE_DATE_EPOCH` — the Unix timestamp verbatim. Used by every
+  downstream build tool (gcc, tar, gzip, ar, objcopy, …).
+- `DEBIAN_SNAPSHOT_DATE` — the same timestamp rounded to the UTC
+  day boundary, formatted as `YYYYMMDDT000000Z`. Used by the next
+  step to pin the arm64 Debian mirror to `snapshot.debian.org`.
 
 `SOURCE_DATE_EPOCH` is a
 [reproducible-builds.org convention](https://reproducible-builds.org/docs/source-date-epoch/):
 a single Unix timestamp that build tools substitute for "now"
-wherever they'd otherwise embed a build-time date. `gcc` respects it
-for `__DATE__`/`__TIME__` macros, `tar` for `--mtime=@$SOURCE_DATE_EPOCH`,
-`gzip` via `-n`, `ar` + `objcopy` (binutils ≥ 2.35) for embedded
-timestamps in archives and build-IDs.
+wherever they'd otherwise embed a build-time date. `gcc` respects
+it for `__DATE__`/`__TIME__` macros, `tar` for
+`--mtime=@$SOURCE_DATE_EPOCH`, `gzip` via `-n`, `ar` + `objcopy`
+(binutils ≥ 2.35) for embedded timestamps in archives and
+build-IDs.
+
+### Step 4: `Fetch Raspbian keyring` (conditional)
+
+Runs only for arm cells (which use Raspbian mirrors). Debootstrap
+won't trust a Raspbian mirror unless we give it Raspbian's signing
+key. Downloads `raspbian.public.key`, dearmors it into a binary
+keyring file that debootstrap accepts.
+
+### Step 5: `Debootstrap rootfs`
+
+This is where the chroot gets built. Picks the right mirror URL +
+keyring based on `matrix.cell.mirror` (`raspbian` / `raspbian-legacy`
+/ `debian`) and runs debootstrap. When it finishes, `./rootfs/` is a
+minimal bookworm-armhf (or whatever the cell is) install.
+
+For the `debian` mirror (arm64 cells), the URL substitutes
+`$DEBIAN_SNAPSHOT_DATE` from step 3 — so the build pulls from the
+`snapshot.debian.org` archive of the triggering commit's UTC day,
+not a hardcoded date.
+
+This step takes ~60–90 s — the bulk of each cell's runtime.
 
 The value is derived from the tag itself, not configured separately:
 same input (tagged commit) → same output (tarball), forever. See
@@ -1080,10 +1100,13 @@ build tool respects it:
 --numeric-owner` + `--format=ustar`. Member order and per-member
 metadata are fully determined by the filename list + SDE.
 
-**Pinned Debian snapshot for arm64.**
-`snapshot.debian.org/archive/debian/20250222T000000Z` — that URL
-returns exactly the same package bytes forever. All arm64 cells
-are fully locked down against Debian drift.
+**Pinned Debian snapshot for arm64, derived from the tag.** Step 5
+pulls from `snapshot.debian.org/archive/debian/<SNAP>T000000Z`,
+where `<SNAP>` is the UTC day of the triggering commit's
+timestamp. `snapshot.debian.org` preserves every daily archive
+forever, so the URL resolves identically in future. Each tagged
+release builds against a coherent Debian snapshot from its own
+day — a self-contained per-release pin.
 
 **No `git`-state noise.** `actions/checkout` always produces the
 exact commit tree that triggered the run. For a tag push that's

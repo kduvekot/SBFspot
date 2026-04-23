@@ -255,6 +255,36 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             debootstrap xxd binutils file curl jq debian-archive-keyring
 
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          path: src
+
+      - name: Derive SOURCE_DATE_EPOCH + snapshot date from triggering commit
+        # The commit that triggered this run has a single immutable
+        # timestamp. Use that as the reproducible-builds canonical
+        # "build moment" — every downstream tool (tar, gzip, gcc,
+        # objcopy, ar, strip) respects SOURCE_DATE_EPOCH when set in
+        # the environment. Per-commit → per-tarball reproducibility.
+        # On tag push, SOURCE_DATE_EPOCH is the tag commit's time and
+        # stays fixed forever; on master/PR builds it follows the HEAD
+        # commit. Convention: reproducible-builds.org.
+        #
+        # The arm64 debootstrap step (next) uses snapshot.debian.org
+        # pinned to the UTC-day boundary derived from the same
+        # timestamp. Each tagged release → a coherent snapshot of
+        # Debian as it stood that day.
+        run: |
+          set -euxo pipefail
+          SDE=$(git -C src log -1 --pretty=%ct)
+          SNAP=$(date -u -d @"${SDE}" +%Y%m%dT000000Z)
+          {
+            echo "SOURCE_DATE_EPOCH=${SDE}"
+            echo "DEBIAN_SNAPSHOT_DATE=${SNAP}"
+          } >> "$GITHUB_ENV"
+          echo "Commit timestamp ${SDE} ($(date -u -d @${SDE} +%Y-%m-%dT%H:%M:%SZ))"
+          echo "Debian snapshot pin: ${SNAP}"
+
       - name: Fetch Raspbian keyring (if applicable)
         if: matrix.cell.mirror == 'raspbian' || matrix.cell.mirror == 'raspbian-legacy'
         run: |
@@ -277,7 +307,11 @@ jobs:
               KEYRING="$PWD/keyring/raspbian.gpg"
               ;;
             debian)
-              MIRROR="http://snapshot.debian.org/archive/debian/20250222T000000Z"
+              # Pin to the snapshot nearest the triggering commit's
+              # UTC day. snapshot.debian.org preserves every daily
+              # archive forever, so this URL will resolve identically
+              # long after the release.
+              MIRROR="http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT_DATE}"
               KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
               ;;
           esac
@@ -288,26 +322,6 @@ jobs:
             --include=ca-certificates \
             "${{ matrix.cell.codename }}" \
             rootfs "$MIRROR"
-
-      - name: Check out source
-        uses: actions/checkout@v6
-        with:
-          path: src
-
-      - name: Derive SOURCE_DATE_EPOCH from triggering commit
-        # The commit that triggered this run has a single immutable
-        # timestamp. Use that as the reproducible-builds canonical
-        # "build moment" — every downstream tool (tar, gzip, gcc,
-        # objcopy, ar, strip) respects SOURCE_DATE_EPOCH when set in
-        # the environment. Per-commit → per-tarball reproducibility.
-        # On tag push, SOURCE_DATE_EPOCH is the tag commit's time and
-        # stays fixed forever; on master/PR builds it follows the HEAD
-        # commit. Convention: reproducible-builds.org.
-        run: |
-          set -euxo pipefail
-          SDE=$(git -C src log -1 --pretty=%ct)
-          echo "SOURCE_DATE_EPOCH=${SDE}" >> "$GITHUB_ENV"
-          echo "Commit timestamp ${SDE} ($(date -u -d @${SDE} +%Y-%m-%dT%H:%M:%SZ))"
 
       - name: Stage source tree inside rootfs
         run: |
