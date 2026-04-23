@@ -253,7 +253,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            debootstrap xxd binutils file curl jq debian-archive-keyring
+            debootstrap binutils file curl jq debian-archive-keyring
 
       - name: Check out source
         uses: actions/checkout@v6

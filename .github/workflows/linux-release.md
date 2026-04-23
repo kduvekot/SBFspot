@@ -240,10 +240,16 @@ section is just "what happens when."
 
 ### Step 1: `Install host-side tooling`
 
-Runs on the outer runner (not the chroot). Installs `debootstrap`,
-`binutils`, `file`, `curl`, `jq`, and the Debian archive keyring.
-Everything we need to *build* a chroot and later *compare* binaries
-lives here.
+Runs on the outer runner (not the chroot). Installs the host-side
+tooling needed to build the chroot and inspect output binaries:
+
+- `debootstrap` — creates the chroot.
+- `binutils`, `file` — `readelf` / `objcopy` / `strip` for the
+  post-build inspection steps, plus `file` for quick type checks.
+- `curl`, `jq` — fetching the Debian archive keyring (and,
+  historically, downloading release assets for comparison).
+- `debian-archive-keyring` — signing keys debootstrap uses to
+  verify `snapshot.debian.org` and live Debian mirrors.
 
 ### Step 2: `Check out source`
 
@@ -255,23 +261,36 @@ other triggers it's the current branch state.
 ### Step 3: `Derive SOURCE_DATE_EPOCH + snapshot date from triggering commit`
 
 Reads the commit timestamp of whatever commit triggered the run
-(`git -C src log -1 --pretty=%ct`) and computes two values into
+(`git -C src log -1 --pretty=%ct`) and writes two values to
 `$GITHUB_ENV`:
 
-- `SOURCE_DATE_EPOCH` — the Unix timestamp verbatim. Used by every
-  downstream build tool (gcc, tar, gzip, ar, objcopy, …).
+- `SOURCE_DATE_EPOCH` — the Unix timestamp verbatim.
 - `DEBIAN_SNAPSHOT_DATE` — the same timestamp rounded to the UTC
-  day boundary, formatted as `YYYYMMDDT000000Z`. Used by the next
+  day boundary, formatted `YYYYMMDDT000000Z`. Used by the next
   step to pin the arm64 Debian mirror to `snapshot.debian.org`.
 
 `SOURCE_DATE_EPOCH` is a
 [reproducible-builds.org convention](https://reproducible-builds.org/docs/source-date-epoch/):
 a single Unix timestamp that build tools substitute for "now"
-wherever they'd otherwise embed a build-time date. `gcc` respects
-it for `__DATE__`/`__TIME__` macros, `tar` for
-`--mtime=@$SOURCE_DATE_EPOCH`, `gzip` via `-n`, `ar` + `objcopy`
-(binutils ≥ 2.35) for embedded timestamps in archives and
-build-IDs.
+wherever they'd otherwise embed a build-time date. How it's used
+in this pipeline:
+
+- **gcc** uses it for the `__DATE__` / `__TIME__` macros
+  (SBFspot's source doesn't use those today; safe for future use).
+- **tar** reads it via our explicit
+  `--mtime=@$SOURCE_DATE_EPOCH`, writing that timestamp into every
+  archive member header.
+- **ar** and **objcopy** (binutils ≥ 2.35, released 2020-07)
+  zero out member timestamps / section mtime fields when
+  `SOURCE_DATE_EPOCH` is set in the environment.
+- **gzip** is handled separately: `gzip -n` suppresses the
+  filename + mtime fields in the gzip header regardless of
+  `SOURCE_DATE_EPOCH`. The env var + `-n` together give us a
+  gzip-header that's constant per-tag.
+- **ld**'s `--build-id=sha1` is content-hashed (SHA1 over the
+  loadable segments), not time-based, so it's naturally
+  deterministic given deterministic input — `SOURCE_DATE_EPOCH`
+  doesn't affect it directly.
 
 ### Step 4: `Fetch Raspbian keyring` (conditional)
 
@@ -294,10 +313,6 @@ not a hardcoded date.
 
 This step takes ~60–90 s — the bulk of each cell's runtime.
 
-The value is derived from the tag itself, not configured separately:
-same input (tagged commit) → same output (tarball), forever. See
-[§9](#9-reproducibility-guarantees) for what we do with it.
-
 ### Step 6: `Stage source tree inside rootfs`
 
 `cp -a src/SBFspot rootfs/src/` and the same for
@@ -307,11 +322,13 @@ inside the chroot, ready to compile with the chroot's g++.
 
 ### Step 7: `Install hardened compiler wrapper`
 
-This one's sneaky. We `sudo tee rootfs/usr/local/bin/g++` to create
-a small shell script that *intercepts* calls to `g++` inside the
-chroot. The real g++ lives at `/usr/bin/g++`; our wrapper at
-`/usr/local/bin/g++` comes first in `$PATH` and forwards every call
-to the real g++ with extra flags appended.
+This one's sneaky. We `sudo tee rootfs/usr/local/bin/g++` to
+create a small shell script that *intercepts* calls to `g++`
+inside the chroot. The real compiler lives at `/usr/bin/g++`; our
+wrapper at `/usr/local/bin/g++` is earlier on `$PATH` (sudo's
+default `secure_path` places `/usr/local/bin` before `/usr/bin`),
+so `make` resolves the unqualified `g++` to the wrapper, which
+then `exec`s the real compiler with our hardening flags prepended:
 
 ```sh
 #!/bin/sh
@@ -325,15 +342,25 @@ exec /usr/bin/g++ \
   "$@"
 ```
 
-The `-g` at the end makes gcc emit DWARF debug info; we split it
-into sidecars in step 11. Main binary stays small; auditors get
-symbolication data on demand.
+Flag-ordering note: our flags come **before** the original
+arguments (`"$@"`). gcc's rule for most conflicting flags is that
+the *later* occurrence wins, so if the Makefile ever passed a
+contradicting flag (e.g. `-fno-stack-protector`) it would
+override ours. The V3.9.x Makefile does not, so the hardening
+flags stay effective — but this is worth knowing if the Makefile
+is ever extended.
 
-Why a wrapper instead of editing the Makefile? Because we have a
-hard rule in this fork: **no C++ source changes, no Makefile
-changes**. The wrapper is a clean side-channel: the source tree is
-byte-identical to upstream, but every `g++` invocation gets our
-hardening flags.
+The `-g` at the end makes gcc emit DWARF debug info; step 11
+splits that into a sidecar. Main binary stays small; auditors
+get symbolication data on demand.
+
+Why a wrapper instead of editing the Makefile? The goal is to
+add hardening without touching tracked source. The wrapper is a
+clean side-channel: the Makefile and `.cpp` files stay
+byte-identical to what upstream ships, but every `g++` invocation
+transparently picks up our flags. Easier to review, easier to
+remove if the project later bakes the flags into the Makefile
+directly.
 
 Rationale for each flag is in [§4](#4-why-each-compile-flag).
 
