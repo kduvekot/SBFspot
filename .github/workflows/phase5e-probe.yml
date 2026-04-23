@@ -52,7 +52,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm-buster
@@ -68,7 +68,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm-buster
@@ -86,7 +86,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-gnutls-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
@@ -104,7 +104,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm-bullseye
@@ -120,7 +120,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm-bullseye
@@ -136,7 +136,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
@@ -154,7 +154,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm-bookworm
@@ -170,7 +170,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm-bookworm
@@ -186,7 +186,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
@@ -204,7 +204,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm64-bullseye
@@ -220,7 +220,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm64-bullseye
@@ -236,7 +236,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
@@ -254,7 +254,7 @@ jobs:
             db_pkgs: 'libsqlite3-dev'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: nosql-arm64-bookworm
@@ -270,7 +270,7 @@ jobs:
             db_pkgs: ''
             curl_pkg: ''
             has_daemon: false
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
           - id: mariadb-arm64-bookworm
@@ -286,7 +286,7 @@ jobs:
             db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
             curl_pkg: 'libcurl4-openssl-dev'
             has_daemon: true
-            common_ldflags: '-s'
+            common_ldflags: '-s -Wl,--as-needed'
             sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
             daemon_extra: ''
 
