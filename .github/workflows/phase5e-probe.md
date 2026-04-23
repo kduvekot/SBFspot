@@ -972,4 +972,153 @@ per-variant member-list table.
 
 ## 9. Glossary
 
-*TBD*
+Plain-language definitions of terms used throughout this doc.
+
+**ABI** — Application Binary Interface. The compiled-code contract
+between a binary and its libraries: calling conventions, struct
+layouts, symbol mangling. Two binaries with compatible ABIs can
+share libraries at runtime; incompatible ABIs crash.
+
+**`.a` file (static archive)** — a bundle of `.o` object files
+produced by `ar rcs`. At link time, the linker extracts needed
+objects from the `.a` and copies their code + data into the output
+binary. Once linked, the `.a` is not needed at runtime. Contrast
+with `.so`.
+
+**aarch64 / arm64** — 64-bit ARM architecture. Used by modern Pis
+(Pi 4/5 with 64-bit OS), most ARM servers, Apple silicon Macs.
+
+**armhf** — "ARM hard-float," the 32-bit ARM EABI with hardware
+floating-point calling convention. Used by Pi OS 32-bit. Can be
+executed natively on aarch64 silicon via AArch32 mode.
+
+**ASLR** — Address Space Layout Randomization. Kernel feature:
+every time a PIE binary starts, its code and data are mapped at a
+different random base address, so attackers can't hard-code
+addresses to jump to.
+
+**binutils** — GNU tools for manipulating binaries: `ld`, `ar`,
+`objcopy`, `readelf`, `strip`, `nm`, etc. We use several.
+
+**BIND_NOW** — ELF dynamic flag requesting "resolve all symbols
+at startup, not lazily." Prerequisite for full RELRO.
+
+**bluez** — Linux Bluetooth stack. Ships `libbluetooth.so.3` +
+`libbluetooth.a` via the `libbluetooth-dev` package; also the
+`bluetoothd` daemon. SBFspot uses libbluetooth for talking to
+older Bluetooth-enabled SMA inverters.
+
+**bluez source package** — the Debian source package named `bluez`
+that produces `libbluetooth3`, `libbluetooth-dev`, `bluez`, and
+several other binary packages. Fetched via `apt-get source bluez`.
+
+**chroot** — "change root." A process's view of the filesystem is
+restricted to a subtree starting at a specified directory. Used here
+to pretend to be a different Debian version than the host runner is.
+
+**`.comment` section** — an ELF section containing a string like
+`GCC: (Debian 12.2.0-14) 12.2.0` identifying which compiler built
+the binary. Normalised away during binary compare.
+
+**cross-compile** — compiling on one architecture for execution on
+another. Not what we do — we build natively for armhf on aarch64
+silicon, which is the same instruction-set family. Upstream
+cross-compiles from Windows x86_64 to armhf / aarch64, which is a
+different setup.
+
+**debootstrap** — a tool that downloads + unpacks a minimal set of
+Debian/Raspbian packages into a target directory, producing a
+working chroot for that codename/architecture.
+
+**deb-src** — apt source-package repository entry. Needed for
+`apt-get source <pkg>`. Not included in debootstrap's default
+`sources.list`; we add it in step 8.
+
+**ELF** — Executable and Linkable Format. The binary file format
+Linux uses for executables, shared libraries, and object files.
+
+**ET_DYN vs ET_EXEC** — ELF file types. `ET_EXEC` is a
+fixed-address executable. `ET_DYN` is a shared object; when
+loadable-as-executable, it's a PIE.
+
+**GOT** — Global Offset Table. A table of pointers inside the
+binary; PIC code accesses globals indirectly through the GOT so
+the pointers can be patched at load time for a randomized address.
+Target of RELRO hardening.
+
+**LIBS (Makefile variable)** — SBFspot's Makefile declares
+`LIBS := pthread bluetooth boost_date_time boost_system` plus the
+DB-specific ones. At link time the Makefile emits
+`$(addprefix -l,$(LIBS))` → `-lpthread -lbluetooth -lboost_date_time …`.
+
+**LDFLAGS** — conventional Make variable for linker flags passed
+to `ld` (via the compiler driver). We override it per-cell from
+the workflow.
+
+**NEEDED** — ELF dynamic-section entry (`DT_NEEDED`) listing a
+shared library the binary requires at runtime. `readelf -d | grep
+NEEDED` shows these. If `libX.so.N` is in NEEDED, the loader will
+refuse to start the binary without `libX.so.N` installed.
+
+**Non-PIC vs PIC code** — see §6. Non-PIC uses absolute addresses;
+PIC goes through the GOT. Non-PIC static archives don't work well
+inside PIE executables.
+
+**PIE** — Position-Independent Executable. Links `-pie`, needs
+`-fPIE` compile. Enables ASLR at runtime. Debian hardening default.
+
+**relocation** — an instruction in an ELF file that says "at load
+time, patch this address using information about symbol X." The
+linker decides at link time which relocations to emit; the loader
+processes them at startup. Text relocations (inside the `.text`
+section) are the problematic kind that RELRO can't handle.
+
+**RELRO** — "RELocation Read-Only." Linker flag `-z,relro`:
+segments containing relocations get marked read-only after load-time
+patching is done. Paired with BIND_NOW for "full RELRO," which
+eliminates writable relocations entirely. Blocks a class of
+exploits that overwrite the GOT.
+
+**root / rootfs** — the top-level directory of a Unix filesystem
+hierarchy. Inside a chroot, the chroot's directory *is* the root.
+
+**runner** — a machine (VM, in GitHub's case) that executes a
+GitHub Actions job.
+
+**sbfspot-config** — upstream's installer script at
+`SBFspot/sbfspot-config`. Interactive Bash + whiptail UI that walks
+a user through installing a SBFspot tarball on their Raspberry Pi.
+Not touched by this workflow, but relevant because it defines what
+runtime deps exist on a fresh install.
+
+**.so file (shared object)** — a library meant for runtime dynamic
+linking. `libfoo.so.N` is the runtime file; `libfoo.so` is usually
+a symlink to it for the linker to find. Contrast with `.a`.
+
+**sources.list** — apt's configuration file listing package
+repositories. Inside our chroots, debootstrap writes this for us.
+
+**sysroot** — the directory tree that stands in as `/` for a
+cross-compiler. Contains headers and libraries for the target
+architecture. Upstream's Windows toolchain has its sysroot at
+`d:\rpi\cross\<codename>\gcc<ver>\<triplet>\sysroot\`.
+
+**TEXTREL** — DT_TEXTREL dynamic flag. Indicates the binary has
+relocations inside its `.text` (code) segment. Bad for security
+(requires writable code segment at load time) and incompatible
+with full RELRO. Emitted by the linker when static-linking non-PIC
+code into a PIE executable on armhf.
+
+**triplet** — a GNU-style identifier for a CPU + OS + ABI
+combination, e.g. `arm-linux-gnueabihf`, `aarch64-linux-gnu`,
+`x86_64-w64-mingw32`. Used in library paths like
+`/usr/lib/arm-linux-gnueabihf/`.
+
+**Ubuntu-24.04-arm** — GitHub Actions runner image label. Points
+to a 4-core Ampere Altra (aarch64) VM running Ubuntu 24.04.
+
+---
+
+*Doc ends. The YAML is the source of truth for exact flag values +
+step order; this doc is the source of truth for the reasoning
+behind each choice.*
