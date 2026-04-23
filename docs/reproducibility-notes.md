@@ -108,25 +108,32 @@ a33c0d9e116860d935ba8fcc8fa175ce7f9d7a25f0378ffcf63ecbdbfaa90e14  sbfspot-nosql-
 ### Caveat on these exact hashes
 
 These hashes came from the reference rebuild during development.
-If someone re-runs the pipeline on V3.9.12 today, they will
-likely see **small drift** on the 9 arm cells — because Raspbian's
-live archive has probably pushed library updates since the
-reference rebuild date (see
-[`linux-release.md §9 — Known limitation`](../.github/workflows/linux-release.md#known-limitation-live-raspbian-archive)).
+Re-running the current workflow against V3.9.12 will produce a
+**different** set of SHA256s, for two reasons:
 
-The 6 arm64 cells will still match exactly, because those are
-built against the pinned Debian snapshot.
+- **arm64 cells** were then pinned to `snapshot.debian.org@20250222`
+  (the release-upload date). The current workflow derives the
+  snapshot pin from the tag commit's UTC day → `20250218` for
+  V3.9.12. If Debian pushed any security update between those two
+  days the bytes shift.
+- **SBOMs** did not exist then; the current workflow additionally
+  produces 15 `.packages.list` files per run.
 
-The reproducibility guarantee is:
+What the hashes above still demonstrate is the core property:
+between run A (`24842197467`) and run B (`24842590751`), minutes
+apart, all 30 tarballs were byte-identical. That's the
+reproducibility guarantee the pipeline ships — **same input + same
+workflow → same output**, on that day's state of the archives.
 
-- **Within a single workflow run's lifetime** (two dispatches,
-  minutes apart): all 30 hashes byte-identical.
-- **Across time**: the 6 arm64 hashes are stable; the 9 arm
-  hashes drift with Raspbian security updates.
+Across longer time spans:
+- The 6 arm64 hashes will match between any two runs that resolve
+  to the same Debian snapshot date (i.e. same commit).
+- The 9 arm hashes drift with Raspbian security updates (no
+  snapshot service on the arm side).
 
-For the release-attached tarballs on GitHub Releases, the hashes
-above can be archived in the release notes to document what was
-shipped for that tag.
+For each future release, canonical SHAs for the 45 attached assets
+(15 main + 15 debug + 15 SBOM) can be archived in the Release
+notes to document what shipped for that tag.
 
 ## How to measure reproducibility yourself
 

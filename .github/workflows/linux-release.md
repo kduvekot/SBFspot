@@ -9,8 +9,9 @@ know those terms, skip ahead — headings are dense enough to navigate.
 **What this pipeline is.** An auditable, reproducible CI replacement
 for the 15 Linux tarballs that have historically been hand-built on
 the maintainer's Windows machine. On every tag push (`V3.9.*`), the
-workflow produces 30 artefacts (15 main tarballs + 15 DWARF-debug
-sidecars) and attaches them to the matching GitHub Release. On
+workflow produces 45 artefacts — 15 main tarballs, 15 DWARF-debug
+sidecars, and 15 package SBOMs — and attaches them to the matching
+GitHub Release. On
 master pushes and pull requests it builds the same set for
 validation without publishing.
 
@@ -139,11 +140,11 @@ the host's. It's isolation without the overhead of a full container.
 | `http://legacy.raspbian.org/raspbian` | arm × buster | Raspbian dropped buster from the live archive; legacy mirror serves the frozen final state. |
 | `http://snapshot.debian.org/archive/debian/<YYYYMMDD>T000000Z` | arm64 × all | Debian's snapshot service, pinned to the UTC-day boundary of the triggering commit's timestamp. Each tagged release builds against a coherent Debian snapshot from its own day. |
 
-The arm64 snapshot pin is **derived at run time**, not hardcoded —
-see step 5. A V3.9.12 build resolves to
-`20250218T000000Z`; a V3.9.13 build a few months later will
-automatically pick the snapshot for that commit's day. No per-
-release maintenance.
+The arm64 snapshot pin is **derived at run time** (step 3) and
+applied by debootstrap (step 5), not hardcoded. A V3.9.12 build
+resolves to `20250218T000000Z`; a V3.9.13 build a few months
+later will automatically pick the snapshot for that commit's day.
+No per-release maintenance.
 
 Raspbian doesn't run a functional snapshot service, so the arm
 cells use the live archive and accept its natural drift. If
@@ -281,10 +282,10 @@ same input (tagged commit) → same output (tarball), forever. See
 
 ### Step 6: `Stage source tree inside rootfs`
 
-`cp -a upstream/SBFspot rootfs/src/` and the same for
-`SBFspotUploadCommon` (and `SBFspotUploadDaemon` if the cell has
-a daemon — `nosql` doesn't). After this, the source is inside the
-chroot, ready to compile with the chroot's g++.
+`cp -a src/SBFspot rootfs/src/` and the same for
+`src/SBFspotUploadCommon` (and `src/SBFspotUploadDaemon` if the
+cell has a daemon — `nosql` doesn't). After this, the source is
+inside the chroot, ready to compile with the chroot's g++.
 
 ### Step 7: `Install hardened compiler wrapper`
 
@@ -297,7 +298,7 @@ to the real g++ with extra flags appended.
 ```sh
 #!/bin/sh
 exec /usr/bin/g++ \
-  '-fmacro-prefix-map=/usr/include=<upstream-prefix>' \
+  '-fmacro-prefix-map=/src=/build/sbfspot' \
   -D_FORTIFY_SOURCE=2 \
   -fstack-protector-strong \
   -D_GLIBCXX_ASSERTIONS \
@@ -433,8 +434,10 @@ Two sources of package names:
    `dpkg -S <path>` which package owns it. Union across SBFspot and
    SBFspotUploadDaemon (where applicable).
 2. **Explicitly-installed build tooling:** `g++`, `make`,
-   `binutils`, `dpkg-dev`, plus the per-cell `-dev` packages and
-   `bluez` (whose source the PIC libbluetooth rebuild uses).
+   `binutils`, `dpkg-dev`, `libbluetooth-dev`,
+   `libboost-date-time-dev`, `libboost-system-dev`,
+   `bluez` (source for the PIC libbluetooth rebuild), plus the
+   per-cell `db_pkgs` (sqlite/mariadb dev) and `curl_pkg`.
 
 Then for each package in the union:
 - `dpkg-query` for exact version and architecture.
@@ -1244,7 +1247,7 @@ working chroot for that codename/architecture.
 
 **deb-src** — apt source-package repository entry. Needed for
 `apt-get source <pkg>`. Not included in debootstrap's default
-`sources.list`; we add it in step 8.
+`sources.list`; added inline by step 9.
 
 **ELF** — Executable and Linkable Format. The binary file format
 Linux uses for executables, shared libraries, and object files.
