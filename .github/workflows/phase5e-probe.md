@@ -663,7 +663,155 @@ libstdc++'s math usage; `-lc` is implicit; `-lpthread` is in
 
 ## 6. The PIC libbluetooth rebuild
 
-*TBD*
+This is the trickiest part of the workflow. Understanding why we
+need it requires understanding two concepts: PIC vs PIE, and
+text relocations.
+
+### PIC vs PIE — one-paragraph primer
+
+**PIC** stands for Position-Independent **Code**. Compiler setting
+(`-fPIC`). Code that doesn't hard-code absolute addresses for
+functions or globals — instead it looks them up through a table
+(the Global Offset Table, GOT) that the loader fills in at runtime.
+Required for shared libraries (`.so`), because a `.so` can be loaded
+at any address.
+
+**PIE** stands for Position-Independent **Executable**. Linker
+output type (`-pie`). An executable that can be loaded at a
+randomized address (ASLR). Requires all its code to be PIC.
+
+So: **every piece of code that goes into a PIE binary must be PIC.**
+
+### What breaks
+
+Debian ships `libbluetooth.a` (static archive) in the
+`libbluetooth-dev` package. But Debian builds that `.a` **without
+`-fPIC`** on armhf — the object files inside use absolute 32-bit
+addresses for their globals.
+
+When our linker tries to static-link that non-PIC `.a` into a PIE
+binary:
+
+- On **arm64**: the aarch64 instruction set uses PC-relative
+  addressing natively, so the linker can transparently convert
+  absolute references into PC-relative ones during link. No drama.
+- On **armhf**: the linker has no choice but to emit *text
+  relocations* — entries in the dynamic section that tell the
+  loader "at startup, patch this specific byte in the code segment
+  with the absolute address of symbol X." That sets the ELF
+  `DT_TEXTREL` flag and makes the code segment writable at load
+  time, which breaks RELRO and is universally flagged by security
+  auditors.
+
+We hit this exact bug in Phase 5e.1: `readelf -d` on every armhf
+cell showed `FLAGS: TEXTREL BIND_NOW`. Arm64 cells showed clean
+`FLAGS: BIND_NOW`.
+
+### What upstream does (that we don't)
+
+Upstream's armhf binaries are non-PIE (`ELF … executable`, not
+`pie executable`) — see Phase 1 fingerprint. A non-PIE executable
+is loaded at a fixed address, so absolute addresses in non-PIC
+`.a` files work fine. No TEXTREL, no warnings.
+
+We chose not to follow that route because PIE is a meaningful
+security win and we want modern-best-practice output. So we need
+`libbluetooth.a` to be **PIC**, not non-PIC.
+
+### What we tried first (5e.1b — rejected)
+
+Simplest workaround: drop the static-link entirely, let
+`libbluetooth.so.3` be a dynamic dep.
+
+Result: TEXTREL gone, but `libbluetooth.so.3` appeared in NEEDED.
+Users on Pi OS Lite (no `bluez` installed) couldn't run the binary
+at all. Real portability regression; rejected.
+
+### What we do instead (5e.1c — this workflow)
+
+**Rebuild `libbluetooth.a` from the cell's own distro source, with
+`-fPIC`, and install it over the distro's non-PIC one.**
+
+Concretely, step 8:
+
+```sh
+# Enable deb-src so apt-get source works (debootstrap's sources.list
+# only has binary-package entries by default).
+sed -n 's/^deb /deb-src /p' /etc/apt/sources.list >> /etc/apt/sources.list
+apt-get update -qq
+apt-get install -y --no-install-recommends dpkg-dev
+
+# Fetch the bluez source for *this codename* (matches the binary
+# package's source exactly).
+mkdir -p /tmp/bluez && cd /tmp/bluez
+apt-get source bluez
+
+# Build the same 3 source files Debian's Makefile.am says go into
+# libbluetooth.la, with -fPIC. The sources are stable across
+# bluez 5.50 / 5.55 / 5.66 (buster / bullseye / bookworm).
+cd bluez-*/lib
+gcc -fPIC -O2 -Wall -I. -c bluetooth.c hci.c sdp.c
+ar rcs libbluetooth.a bluetooth.o hci.o sdp.o
+
+# Install over the stock .a.
+install -m 0644 libbluetooth.a /usr/lib/$TRIPLET/libbluetooth.a
+```
+
+The subsequent SBFspot build's `-Wl,-Bstatic -lbluetooth` picks up
+our PIC `.a`, which static-links cleanly into the PIE executable
+with no TEXTREL. `libbluetooth.so.3` stays out of NEEDED, matching
+upstream's runtime-dep surface.
+
+### Why we bypass autoconf
+
+bluez is an autotools project — it normally builds via
+`./configure && make`. `./configure` has a long list of checks and
+disable flags; running it correctly across bluez 5.50 / 5.55 / 5.66
+with all the right `--disable-*` options is finicky.
+
+Bypassing it works because `lib/bluetooth.c` + `lib/hci.c` +
+`lib/sdp.c` have a single `#ifdef HAVE_CONFIG_H` guard that skips
+the generated `config.h` if we don't define it. No other autotools
+magic is needed for just these three files.
+
+### Why exactly these 3 files
+
+From bluez's root `Makefile.am`:
+
+```
+lib_sources = lib/bluetooth.c lib/hci.c lib/sdp.c
+lib_libbluetooth_la_SOURCES = $(lib_headers) $(lib_sources)
+```
+
+`libbluetooth.la` (the installed public library) is built from
+`lib_sources` only — not `lib/uuid.c` or the other files under
+`lib/`. We verified that the 3-file list is stable across bluez
+5.50 (buster), 5.55 (bullseye), and 5.66 (bookworm).
+
+SBFspot uses exactly one symbol from libbluetooth — `str2ba` — and
+it's defined in `bluetooth.c`. So even our 3-file rebuild is
+overkill for SBFspot specifically, but we want to match Debian's
+library content exactly so any ABI-compatible caller sees the
+same symbols.
+
+### How we verify it worked
+
+The step ends with:
+
+```sh
+readelf -r /usr/lib/$TRIPLET/libbluetooth.a | grep -E \
+  'R_ARM_GOT|R_AARCH64_.*GOT|R_ARM_GOTOFF' | head -3
+```
+
+If the `.a` is PIC, relocations of those types (indirect-through-GOT)
+will be present. If non-PIC, they won't be. We check in step 8 so
+a regression surfaces immediately, not 3 steps later when the
+SBFspot link produces TEXTREL.
+
+### Cost
+
+~30 s per cell for `apt-get update` + source fetch + the 3-file
+compile + install. Tiny compared to the ~90 s debootstrap.
 
 ## 7. Per-cell matrix table
 
