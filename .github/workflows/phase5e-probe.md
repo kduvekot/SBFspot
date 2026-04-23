@@ -1008,24 +1008,16 @@ addendum.
 rootfs tar across runs, we could cut matrix time ~20 %.
 
 **Why not yet:** we prioritised correctness + hardening over speed.
-Caching is listed as a Phase 5e.2 follow-up. The risk is subtle —
-a cached rootfs can go stale against the live Raspbian archive and
-introduce non-obvious package-version drift. We'd need a deliberate
-cache-invalidation strategy.
+Caching is deferred. The risk is subtle — a cached rootfs can go
+stale against the live Raspbian archive and introduce non-obvious
+package-version drift. We'd need a deliberate cache-invalidation
+strategy. See [§9](#9-reproducibility-guarantees) for why the
+drift matters.
 
 ### `-flto`, `-march=native`, `-O3`
 
 See §4 "Flags we don't apply." Short version: no meaningful gain,
 risk of breakage, not worth it.
-
-### Per-variant tarball assembly (Phase 5e.2 — not yet done)
-
-This workflow measures per-binary. It does **not** yet re-assemble
-the full tarball (tar + gzip) with the right member list per
-variant. That's planned as Phase 5e.2: reproduce upstream's
-`sbfspot-sqlite-arm-linux-bookworm.tar.gz` exactly, member-by-member,
-with `tar --sort=name --owner=0 --group=0 --numeric-owner` and a
-per-variant member-list table.
 
 ## 9. Reproducibility guarantees
 
