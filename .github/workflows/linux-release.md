@@ -417,11 +417,14 @@ objcopy --add-gnu-debuglink=SBFspot.debug SBFspot   # add wiring
 
 After this:
 
-- `SBFspot` is stripped (~400–500 KB depending on cell), runnable,
-  and has a new small `.gnu_debuglink` ELF section pointing gdb /
-  `debuginfod` at the sidecar.
-- `SBFspot.debug` has only the DWARF content (~5–7 MB), not
-  runnable, usable for symbolication.
+- `SBFspot` is stripped (~400–550 KB depending on cell — measured
+  419 KB/454 KB/461 KB/505 KB/526 KB across a sampling of the 15
+  cells during the reference rebuild), runnable, and has a new
+  small `.gnu_debuglink` ELF section pointing gdb / `debuginfod`
+  at the sidecar.
+- `SBFspot.debug` has only the DWARF content (~5–7 MB uncompressed;
+  ~2–3 MB after the sidecar tarball is gzipped), not runnable,
+  usable for symbolication.
 
 The stripped binary is what goes into the main tarball. The
 sidecars go into a companion `.debug.tar.gz` (step 15). If a user
@@ -535,9 +538,15 @@ Per-variant member list:
 
 Two files get renamed during staging: `SBFspot.cfg` →
 `SBFspot.default.cfg` and `SBFspotUpload.cfg` →
-`SBFspotUpload.default.cfg`. Upstream convention: "default" in the
-filename so `sbfspot-config`'s install flow doesn't overwrite a
-user's edited copy on upgrade.
+`SBFspotUpload.default.cfg`. This matches the long-standing
+filename convention in the V3.9.x tarballs. The `.default.cfg`
+naming means that extracting the tarball directly over an
+existing install won't clobber a user-edited `SBFspot.cfg` — the
+sample config is carried as a separate, distinctly-named file.
+(Note: `sbfspot-config`, the interactive installer, generates
+its own `SBFspot.cfg` from shell templates and does not read the
+`.default.cfg` from the tarball. The file is effectively a
+reference / sample for manual installs.)
 
 **Second tarball: debug sidecars.** The same step also assembles
 `sbfspot-<db>-<arch>-linux-<codename>.debug.tar.gz`, containing
