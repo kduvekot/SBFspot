@@ -110,13 +110,16 @@ runs-on: ubuntu-24.04-arm
 ```
 
 we're saying "give me a freshly-booted Ubuntu 24.04 VM whose CPU is
-**aarch64** (64-bit ARM)." This is a real hardware VM on Azure's
-Ampere Altra silicon, not an emulated one. That matters because:
+**aarch64** (64-bit ARM)." This is a real aarch64 VM — no emulation
+layer. That matters because:
 
-- 64-bit ARM chips can execute 32-bit ARM (armhf) binaries
-  **natively** via the AArch32 execution mode built into the CPU.
-  So a single runner can build and smoke-test *both* arm64 and
-  armhf cells, with no QEMU emulation slowing things down.
+- 64-bit ARM cores that support the AArch32 execution mode can
+  run 32-bit ARM (armhf) binaries directly. The runners GitHub
+  provides on this label do support AArch32, which the pipeline
+  demonstrates empirically on every run: step 12 executes the
+  freshly-compiled armhf binary and it prints its version banner
+  without QEMU involvement. So a single runner builds *and*
+  smoke-tests both arm64 and armhf cells.
 
 ### Chroots via `debootstrap`
 
@@ -147,8 +150,8 @@ the host's. It's isolation without the overhead of a full container.
 
 | Mirror | For which cells | Notes |
 |---|---|---|
-| `http://archive.raspbian.org/raspbian` | arm × {bullseye, bookworm} | Current Raspbian archive. armhf binaries are Raspbian-flavoured (`.comment` carries `GCC: (Raspbian X+rpi1)`). |
-| `http://legacy.raspbian.org/raspbian` | arm × buster | Raspbian dropped buster from the live archive; legacy mirror serves the frozen final state. |
+| `http://archive.raspbian.org/raspbian` | arm × {bullseye, bookworm} | Current Raspbian archive. armhf binaries ship with `.comment` carrying `GCC: (Raspbian X+rpi1)` — verify with `readelf -p .comment <binary>` on any upstream arm tarball. |
+| `http://legacy.raspbian.org/raspbian` | arm × buster | Raspbian's legacy archive for `oldoldstable` releases. `archive.raspbian.org` has removed buster's package indexes (its `dists/buster/Release` is 404); `legacy.raspbian.org` continues to serve buster and receives occasional maintenance updates. |
 | `http://snapshot.debian.org/archive/debian/<YYYYMMDD>T000000Z` | arm64 × all | Debian's snapshot service, pinned to the UTC-day boundary of the triggering commit's timestamp. Each tagged release builds against a coherent Debian snapshot from its own day. |
 
 The arm64 snapshot pin is **derived at run time** (step 3) and
@@ -157,12 +160,13 @@ resolves to `20250218T000000Z`; a V3.9.13 build a few months
 later will automatically pick the snapshot for that commit's day.
 No per-release maintenance.
 
-Raspbian doesn't run a functional snapshot service, so the arm
-cells use the live archive and accept its natural drift. If
-bookworm library versions shift, the arm binaries shift with them.
-The per-cell SBOM (step 14) records exactly which package
-versions were installed, so the state at build time remains
-auditable even if the archive has moved on.
+Raspbian doesn't run a functional snapshot service (the
+`snapshot.raspbian.org/archive/…` paths return 404). All 9 arm
+cells therefore use whichever Raspbian mirror is current at build
+time, including the legacy buster mirror, which is not a
+strictly-frozen snapshot either. The per-cell SBOM (step 14)
+records exactly which package versions were installed, so build-
+time state remains auditable even if a mirror has moved on.
 
 ### The 15-cell matrix
 
@@ -189,8 +193,11 @@ them in parallel. Each job gets a fresh `ubuntu-24.04-arm` runner
 and runs the same set of steps — but with different matrix values
 filled in via `${{ matrix.cell.codename }}`, etc.
 
-Wall-clock per full matrix run: 3–5 minutes. Every cell does its own
-debootstrap + compile + link + smoke-test independently.
+Wall-clock per full matrix run: ~4–6 minutes (observed during the
+development reference rebuild — the slowest cells spent ~90 s on
+debootstrap + ~60 s on the build). Every cell does its own
+debootstrap + compile + link + smoke-test independently, so the
+total time is gated by the slowest cell, not the sum.
 
 ### Triggering the workflow
 
