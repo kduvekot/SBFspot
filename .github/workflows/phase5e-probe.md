@@ -501,7 +501,165 @@ C++ ABI changes between gcc versions for armhf; it's cosmetic.
 
 ## 5. Why each link flag
 
-*TBD*
+LDFLAGS for each cell is built in step 9 of the workflow from three
+pieces:
+
+```
+SBFSPOT_LDFLAGS = $common_ldflags $HARDEN $sbfspot_extra
+```
+
+where:
+
+- `common_ldflags` = `-s -Wl,--as-needed` (same on every cell)
+- `HARDEN` = `-pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--build-id=sha1`
+- `sbfspot_extra` = `-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic` (same on every cell)
+- `daemon_extra` = `''` (empty, same on every cell — daemon doesn't need bluez)
+
+### A note on the `-Wl,…` syntax
+
+gcc passes most `-X` options to its own internal machinery. To pass
+a flag through to the **linker** (`ld`), you prefix it with `-Wl,`.
+E.g. `-Wl,-z,now` becomes `-z now` when ld sees it. That's why all
+the linker-specific flags below look weird.
+
+### `-s`
+
+**What:** strip all symbol and debug info from the output binary.
+
+**Why:** matches upstream's Makefile default, shrinks the binary.
+Debug info is useless to end users and bloats the tarball. We could
+instead produce a separate `.debug` sidecar (planned Phase 5e.3) —
+until then, symbols are discarded.
+
+### `-Wl,--as-needed`
+
+**What:** for each `-lX` the linker encounters, only emit a
+DT_NEEDED entry for `libX.so` if at least one symbol from that
+library is actually used by the code.
+
+**Why:** SBFspot's Makefile ends its link line with
+`-Wl,-Bdynamic $(addprefix -l,$(LIBS))`, which lists every library
+the program *might* need. Without `--as-needed`, every `-l` adds a
+NEEDED entry regardless of whether it's used — which would re-add
+`libbluetooth.so.3` to NEEDED after our static-libbluetooth dance,
+since the Makefile's trailing `-lbluetooth` comes *after* our
+static-link block.
+
+**Why not rely on the default:** Debian bullseye and bookworm
+default to `--as-needed`, but **buster defaults to `--no-as-needed`**.
+Without this flag explicit, our buster cells had `libbluetooth.so.3`
+in NEEDED despite the static-link. Adding `-Wl,--as-needed`
+explicitly makes all 15 cells behave identically regardless of
+distro default.
+
+### `-pie`
+
+**What:** produce an ELF of type `ET_DYN` with an `INTERP` segment,
+i.e. a position-independent executable.
+
+**Why:** see `-fPIE` rationale in §4. `-fPIE` (compile) + `-pie`
+(link) together enable ASLR at runtime.
+
+### `-Wl,-z,relro`
+
+**What:** GNU_RELRO — tells the dynamic linker "mark certain
+segments (the GOT, initialised data that shouldn't change after
+startup) read-only after all relocations are done at program
+startup."
+
+**Why:** mitigates attacks that overwrite the Global Offset Table
+to hijack function pointer resolution. Classic technique in
+exploit chains.
+
+### `-Wl,-z,now`
+
+**What:** BIND_NOW — resolve *all* dynamic symbols at program
+startup, not lazily on first call.
+
+**Why:** enables "full RELRO" — together with `-z,relro`, means the
+GOT is fully populated and read-only from startup onwards. Lazy
+binding (the default) requires the GOT to stay writable for the
+program's lifetime, which weakens RELRO. Debian hardening default.
+
+Slight startup-time cost (all symbols resolved up front). For a
+long-lived program like SBFspot, this is a one-time cost dwarfed by
+normal operation.
+
+### `-Wl,-z,noexecstack`
+
+**What:** marks the stack as non-executable via a PT_GNU_STACK ELF
+segment with flags `RW` (not `RWE`).
+
+**Why:** prevents attackers from jumping to injected shellcode on
+the stack. Modern kernels already enforce NX stacks by default on
+x86_64/aarch64, but the flag must be on the binary to be honoured.
+
+**Fun history:** C code that nests functions (a GCC extension) or
+uses `__builtin_trampoline` can force the stack executable. SBFspot
+doesn't use those, so the flag is safe.
+
+### `-Wl,--build-id=sha1`
+
+**What:** embed a SHA1 hash of the binary's contents into a
+`.note.gnu.build-id` section. Shows up in `file` output as
+`BuildID[sha1]=abcdef…`.
+
+**Why:** lets core dumps, `perf`, `gdb`, and `debuginfod` uniquely
+identify the binary even after stripping. Deterministic: same bytes
+in → same build-id out. Useful if we ever publish `.debug` sidecars
+(they'll match by build-id).
+
+**Alternative:** `--build-id=none` strips the section entirely.
+Upstream's arm-bookworm binaries use that — probably a Windows
+cross-linker default. We diverge; having a build-id is strictly
+better for forensics.
+
+### `-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic` (in `sbfspot_extra`)
+
+**What:**
+- `-Wl,-Bstatic` flips the linker's search mode to "only look for
+  `.a` archives" (static libraries).
+- `-lbluetooth` causes the linker to search for `libbluetooth.a`
+  (or `libbluetooth.so` if static mode weren't active) in its library
+  path, find it at `/usr/lib/<triplet>/libbluetooth.a`, and pull in
+  all object files from it whose symbols are needed.
+- `-Wl,-Bdynamic` flips back to default mode (prefer `.so`) for
+  everything that comes after.
+
+**Why static libbluetooth:** matches upstream's output. All 15
+upstream binaries have libbluetooth statically embedded (no
+`libbluetooth.so.3` in NEEDED). This is a *portability* property
+— it means users don't need the `bluez` package installed on their
+target system. Rasperry Pi OS Lite doesn't include bluez by default,
+and `sbfspot-config` (upstream's installer) doesn't install it
+either. If our binary dynamically linked libbluetooth, users on
+Pi OS Lite couldn't even `exec` the binary.
+
+**Why it's in `sbfspot_extra` and not `common_ldflags`:** the
+daemon doesn't use libbluetooth, only SBFspot itself does. Keeping
+the bluetooth-specific flag out of the daemon's LDFLAGS keeps the
+daemon's NEEDED list clean.
+
+**Why the static `.a` has to be PIC-rebuilt first:** see [§6](#6-the-pic-libbluetooth-rebuild).
+
+### Flags we could add but don't
+
+- **`-Wl,-z,separate-code`:** separates code and read-only data into
+  distinct PT_LOAD segments for finer-grained page permissions. Some
+  performance benefit, better security. Minor compatibility issues
+  on older kernels; skipped to keep the pipeline simple.
+- **`-Wl,-z,pack-relative-relocs`:** binary-size win on PIE via
+  compressed R_*_RELATIVE sequences. Requires glibc ≥ 2.36;
+  bookworm has 2.36 but bullseye and buster don't. Would complicate
+  per-cell conditionals.
+- **`-flto`:** addressed in §4.
+
+### A note on `-lpthread`, `-lm`, `-lc`
+
+These come in automatically via the compiler driver / Makefile's
+LIBS list. We don't need to manage them. `-lm` is pulled in by
+libstdc++'s math usage; `-lc` is implicit; `-lpthread` is in
+`LIBS := pthread …` in the Makefile.
 
 ## 6. The PIC libbluetooth rebuild
 
