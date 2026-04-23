@@ -642,11 +642,16 @@ exploited to overwrite return addresses (the mechanism behind many
 classic CVEs). Debian default since stretch.
 
 **Alternatives considered:**
-- `-fstack-protector` (only functions with ≥8-byte char buffers) —
-  too narrow.
-- `-fstack-protector-all` — every function — unnecessarily slow;
-  nobody uses it in production.
-- `-fstack-protector-strong` is the Debian/Ubuntu default.
+- `-fstack-protector` (only functions with ≥8-byte char buffers
+  or `alloca()`) — too narrow; misses functions with small char
+  buffers + local arrays.
+- `-fstack-protector-all` — every function, including trivial
+  ones that don't touch the stack in dangerous ways. Higher
+  per-call overhead for proportionally-tiny incremental
+  coverage vs `-strong`. Used by some security-heavy projects
+  but not the mainstream distro default.
+- `-fstack-protector-strong` — the sweet spot and what Debian
+  (and Ubuntu, Fedora, RHEL) defaults to.
 
 ### `-D_GLIBCXX_ASSERTIONS`
 
@@ -713,9 +718,14 @@ option where we considered matching upstream's non-PIE on armhf.
   that don't matter for SBFspot's polling workload.
 - **`-flto`:** Link-time optimisation. Gains negligible on a program
   this size, and would complicate the link step.
-- **`-march=native`:** We're cross-building for generic armhf /
-  aarch64, not the build host. `-march=native` on the runner would
-  produce binaries that crash on older Pis.
+- **`-march=native`:** Would query whatever the build machine's
+  silicon supports and bake that into the binary. The Azure
+  aarch64 runner's cores have ARMv8.2+ features (crypto
+  extensions, dot-product, etc.) that older Raspberry Pis lack.
+  Binaries tuned to the runner could execute instructions that
+  illegal-instruction on a user's Pi. We let gcc use each
+  chroot's distro-default `-march` (e.g. Raspbian's `armv6` for
+  legacy-Pi compatibility) and stay out of the way.
 - **`-fsanitize=address`** / `-fsanitize=undefined`: debugging tools,
   not production-shippable (they require runtime library support).
 
