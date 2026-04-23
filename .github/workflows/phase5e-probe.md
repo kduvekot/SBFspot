@@ -21,15 +21,16 @@ looking: "what did we learn on the way here."
 
 Each section is self-contained, but they build on each other.
 
-1. [What we're actually trying to do](#1-what-were-actually-trying-to-do)
-2. [The shape of a run: runners, chroots, the 15 cells](#2-the-shape-of-a-run)
-3. [Step-by-step walkthrough](#3-step-by-step-walkthrough)
-4. [Why each compile flag](#4-why-each-compile-flag)
-5. [Why each link flag](#5-why-each-link-flag)
-6. [The PIC libbluetooth rebuild](#6-the-pic-libbluetooth-rebuild)
-7. [Per-cell matrix table](#7-per-cell-matrix-table)
-8. [Things we tried and dropped](#8-things-we-tried-and-dropped)
-9. [Glossary](#9-glossary)
+ 1. [What we're actually trying to do](#1-what-were-actually-trying-to-do)
+ 2. [The shape of a run: runners, chroots, the 15 cells](#2-the-shape-of-a-run)
+ 3. [Step-by-step walkthrough](#3-step-by-step-walkthrough)
+ 4. [Why each compile flag](#4-why-each-compile-flag)
+ 5. [Why each link flag](#5-why-each-link-flag)
+ 6. [The PIC libbluetooth rebuild](#6-the-pic-libbluetooth-rebuild)
+ 7. [Per-cell matrix table](#7-per-cell-matrix-table)
+ 8. [Things we tried and dropped](#8-things-we-tried-and-dropped)
+ 9. [Reproducibility guarantees](#9-reproducibility-guarantees)
+10. [Glossary](#10-glossary)
 
 ---
 
@@ -256,7 +257,7 @@ timestamps in archives and build-IDs.
 
 The value is derived from the tag itself, not configured separately:
 same input (tagged commit) → same output (tarball), forever. See
-[§10](#10-reproducibility-guarantees) for what we do with it.
+[§9](#9-reproducibility-guarantees) for what we do with it.
 
 ### Step 6: `Stage source tree inside rootfs`
 
@@ -389,7 +390,7 @@ wall-clock `mtime`).
 
 Result: `out/tarballs/sbfspot-<db>-<arch>-linux-<codename>.tar.gz` —
 byte-identical across runs given identical inputs. See
-[§10](#10-reproducibility-guarantees) for measurement.
+[§9](#9-reproducibility-guarantees) for measurement.
 
 Per-variant member list:
 - **nosql** (9 members): `SBFspot` + `SBFspot.default.cfg` +
@@ -1026,7 +1027,140 @@ variant. That's planned as Phase 5e.2: reproduce upstream's
 with `tar --sort=name --owner=0 --group=0 --numeric-owner` and a
 per-variant member-list table.
 
-## 9. Glossary
+## 9. Reproducibility guarantees
+
+> "Given the same source, the same workflow, and the same input
+> libraries, rebuilding produces byte-identical tarballs."
+
+That's the goal. Here's what we do to achieve it, and what's
+currently proven vs. not.
+
+### What determinism means here
+
+The word gets overloaded. Three levels:
+
+1. **Run-to-run reproducibility, same month** — running the
+   workflow twice in the same day/week produces identical output
+   tarballs.
+2. **Per-tag reproducibility, long-term** — running the workflow a
+   year from now against the same V3.9.x tag produces identical
+   output.
+3. **Bit-for-bit with upstream's tarballs** — we gave up on this in
+   Phase 5 (see [§8](#8-things-we-tried-and-dropped)). Upstream's
+   Windows-7-Zip gzip writer uses a different gzip-header encoding
+   than Linux gzip; matching requires reimplementing their writer.
+   Not worth it for zero user-visible gain.
+
+Level 1 is **proven** (measurement below). Level 2 is partial — one
+real risk documented below. Level 3 is not a goal.
+
+### What we do
+
+**Fixed `SOURCE_DATE_EPOCH`.** Step 5 sets it to the tag commit's
+Unix timestamp (`1739908502` for V3.9.12 = 2025-02-18 19:55:02 UTC).
+Every downstream tool respects it:
+
+| Tool | Effect |
+|---|---|
+| `gcc` | `__DATE__` / `__TIME__` macros use SDE (SBFspot doesn't currently use them, but if it ever does, reproducible). |
+| `ld` | `--build-id=sha1` computes a SHA1 over content, not time, so the build-id is deterministic. |
+| `ar` | Archive member timestamps → 0 (binutils ≥ 2.35). |
+| `objcopy` | Section mtime fields → 0. |
+| `tar` | `--mtime=@${SDE}` writes SDE into every member header. |
+| `gzip` | `gzip -n` suppresses its own mtime + filename fields. |
+
+**Deterministic tar format.** `--sort=name` + `--owner=0 --group=0
+--numeric-owner` + `--format=ustar`. Member order and per-member
+metadata are fully determined by the filename list and SDE.
+
+**Pinned Debian snapshot for arm64.**
+`snapshot.debian.org/archive/debian/20250222T000000Z` — that URL
+returns exactly the same package bytes forever. Our arm64 binaries
+are therefore fully locked down against distro drift.
+
+**No `git`-state noise.** The workflow always checks out the tag,
+never "master" or "HEAD." Two runs a year apart both get the same
+tag commit → same source tree byte-for-byte.
+
+### Measurement: run 1 vs. run 2
+
+Phase 5e.2 commit produced run `24840329834`. Re-triggering the
+workflow produced run `24840705192`, 7 minutes later, no source
+changes. All 15 tarball SHA256s:
+
+```
+98a92a292f30a0471b25ef38699587192b5979b863dc6edf0f8fb5e182940bd4  sbfspot-mariadb-arm-linux-bookworm.tar.gz
+5f49326c0ba4869d8b9a4839e60b12cabe4c5f2e242da801cf8e2ff841ae9862  sbfspot-mariadb-arm-linux-bullseye.tar.gz
+16c5d9f225ec1d2e5761141f1b2c956ffc94ff348c1d063ff200258d9c04d502  sbfspot-mariadb-arm-linux-buster.tar.gz
+eb1f923e0dede227d8abb8818ccb8c2c88ef164fb48496b4e5f59c2ff81fdf42  sbfspot-mariadb-arm64-linux-bookworm.tar.gz
+f2cd2ec7f62389d0ce2b247a33fb817a7bbeb22b1338a2fd6cab063faefb247d  sbfspot-mariadb-arm64-linux-bullseye.tar.gz
+f75f946a630d882391272d23d3e1cf6b1ea70c036ac03ac1a513a552a8ddcb22  sbfspot-nosql-arm-linux-bookworm.tar.gz
+4ae7b5219b8aca2ef4c101d35290ce44e66e442fa1a42e1275f7d44b4e755953  sbfspot-nosql-arm-linux-bullseye.tar.gz
+aa31e7b009b5c8b40c54c852c4236ad4a3318bb423c695e21420e4b298b38de9  sbfspot-nosql-arm-linux-buster.tar.gz
+6305e012a79ec6743b318e1be23e0fbf43a285826997df61c387e2d6bac18910  sbfspot-nosql-arm64-linux-bookworm.tar.gz
+5760a32cae1b86bce8b3dc6809dee9e820b8192c6722045e116e9b3ee5d0e920  sbfspot-nosql-arm64-linux-bullseye.tar.gz
+0bd3b5b28b3bc6ff4538ca87197721a8103112c5473bc4e998c4e1de47d3c62e  sbfspot-sqlite-arm-linux-bookworm.tar.gz
+1fb5dcf266ae4504b04372c3143fb7fb873b7a198d1d682b02b22dea8280082b  sbfspot-sqlite-arm-linux-bullseye.tar.gz
+bc9c6a52e892819be7d1026ddaa9b9aa598f43070f320589766733fe6f03e2ba  sbfspot-sqlite-arm-linux-buster.tar.gz
+7d553deb73eb92b65d07a3792d4053598bc5e31fa61b3fe45c39e9c9bd6d8b3f  sbfspot-sqlite-arm64-linux-bookworm.tar.gz
+00731f90173b8a8b0afaa971a6ef3d9686d8452aa27122b851f4032911cbfb02  sbfspot-sqlite-arm64-linux-bullseye.tar.gz
+```
+
+**Diff between run 1 and run 2: empty.** All 15 tarballs
+byte-identical.
+
+### Known limitation: live Raspbian archive
+
+The 9 arm cells (× {buster, bullseye, bookworm} × {sqlite, nosql,
+mariadb}) use the **live** Raspbian archive — not a snapshot,
+because Raspbian doesn't run a functional snapshot service (Phase 0
+finding). That means:
+
+- If Raspbian pushes a security update to `libc6`, `libgcc-s1`,
+  `libstdc++6`, `libboost-date-time1.*`, `libsqlite3-0`,
+  `libmariadb3`, or `libcurl4` between run N and run N+1, those
+  libraries shift in our chroot and the compiled binaries in the
+  affected arm cells change.
+- Between runs minutes to days apart (as with our test above),
+  this almost never fires — the archive is stable.
+- Between runs weeks or months apart, it *will* fire eventually.
+
+Mitigations we *could* apply later:
+- Bake each codename's rootfs as a Docker image on GHCR once,
+  re-use it per matrix cell. Deterministic across time, but adds
+  an image-build workflow + GHCR maintenance.
+- Pin specific package versions via `apt-get install pkg=x.y.z`
+  per cell. Fragile (apt refuses to downgrade silently sometimes).
+
+For now we document the limitation rather than engineer around it.
+Level-1 reproducibility (same day) is the binding guarantee; level-2
+(long-term) holds *modulo Raspbian security updates*.
+
+### What we intentionally don't try to reproduce
+
+- **Upstream's tar-layer byte-match.** Their Windows 7-Zip-authored
+  gzip header has `os=00` (FAT), `xfl=04` (`--fast`), and a
+  populated wall-clock `mtime`. Ours has `os=03` (Unix), `xfl=00`,
+  `mtime=0`. Reproducing theirs requires a custom gzip writer; no
+  user-visible benefit.
+- **Upstream's per-file mtimes.** They preserve filesystem mtimes
+  from the maintainer's local checkout (2021–2024 range per file).
+  Ours are all `SOURCE_DATE_EPOCH` = 2025-02-18. Equally
+  reproducible, more idiomatic for "this is release V3.9.12."
+- **Upstream's permission bits.** They use `0777` on everything.
+  Ours is 0755 / 0644. Security-sane Unix convention.
+
+### How to verify locally
+
+```sh
+gh run download --repo kduvekot/SBFspot <run-id> -p 'phase5e-*'
+find phase5e-* -name '*.tar.gz' -exec sha256sum {} +
+```
+
+Sort and diff against a previous run's output. Empty diff → clean
+reproducibility.
+
+## 10. Glossary
 
 Plain-language definitions of terms used throughout this doc.
 
