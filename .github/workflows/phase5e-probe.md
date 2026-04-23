@@ -207,7 +207,158 @@ that don't need re-running.
 
 ## 3. Step-by-step walkthrough
 
-*TBD*
+Every cell runs the same 11 steps. Here's what each one does, in
+order, in plain language. Flag rationale is in sections 4–6; this
+section is just "what happens when."
+
+### Step 1: `Install host-side tooling`
+
+Runs on the outer runner (not the chroot). Installs `debootstrap`,
+`binutils`, `file`, `curl`, `jq`, and the Debian archive keyring.
+Everything we need to *build* a chroot and later *compare* binaries
+lives here.
+
+### Step 2: `Fetch Raspbian keyring` (conditional)
+
+Runs only for arm cells (which use Raspbian mirrors). Debootstrap
+won't trust a Raspbian mirror unless we give it Raspbian's signing
+key. Downloads `raspbian.public.key`, dearmors it into a binary
+keyring file that debootstrap accepts.
+
+### Step 3: `Debootstrap rootfs`
+
+This is where the chroot gets built. Picks the right mirror URL +
+keyring based on `matrix.cell.mirror` (`raspbian` / `raspbian-legacy`
+/ `debian`) and runs debootstrap. When it finishes, `./rootfs/` is a
+minimal bookworm-armhf (or whatever the cell is) install.
+
+This step takes ~60–90 s — the bulk of each cell's runtime.
+
+### Step 4: `Check out upstream V3.9.12`
+
+Uses `actions/checkout@v6` to clone the *upstream* SBFspot repo
+(`SBFspot/SBFspot`) at tag `V3.9.12` into `./upstream/`. Not our
+fork — we want the exact upstream source we're trying to reproduce.
+
+### Step 5: `Stage source tree inside rootfs`
+
+`cp -a upstream/SBFspot rootfs/src/` and the same for
+`SBFspotUploadCommon` (and `SBFspotUploadDaemon` if the cell has
+a daemon — `nosql` doesn't). After this, the source is inside the
+chroot, ready to compile with the chroot's g++.
+
+### Step 6: `Install hardened compiler wrapper`
+
+This one's sneaky. We `sudo tee rootfs/usr/local/bin/g++` to create
+a small shell script that *intercepts* calls to `g++` inside the
+chroot. The real g++ lives at `/usr/bin/g++`; our wrapper at
+`/usr/local/bin/g++` comes first in `$PATH` and forwards every call
+to the real g++ with extra flags appended.
+
+```sh
+#!/bin/sh
+exec /usr/bin/g++ \
+  '-fmacro-prefix-map=/usr/include=<upstream-prefix>' \
+  -D_FORTIFY_SOURCE=2 \
+  -fstack-protector-strong \
+  -D_GLIBCXX_ASSERTIONS \
+  -fPIE \
+  "$@"
+```
+
+Why a wrapper instead of editing the Makefile? Because we have a
+hard rule in this fork: **no C++ source changes, no Makefile
+changes**. The wrapper is a clean side-channel: the source tree is
+byte-identical to upstream, but every `g++` invocation gets our
+hardening flags.
+
+Rationale for each flag is in [§4](#4-why-each-compile-flag).
+
+### Step 7: `Install build deps in chroot`
+
+Enters the chroot with `sudo chroot rootfs /bin/sh`, runs
+`apt-get install` for:
+
+- `g++`, `make` — the compiler, which ends up at `/usr/bin/g++`
+  (then shadowed by our wrapper).
+- `libbluetooth-dev`, `libboost-date-time-dev`, `libboost-system-dev`
+  — libraries SBFspot links against.
+- `libsqlite3-dev` or `libmariadb-dev{,-compat}` per cell (nosql
+  gets none).
+- `libcurl4-openssl-dev` or `libcurl4-gnutls-dev` per cell (for the
+  upload daemon only).
+- `binutils`, `file` — for inspecting the built binary.
+
+### Step 8: `Build PIC libbluetooth.a from distro bluez source`
+
+Deep-dive in [§6](#6-the-pic-libbluetooth-rebuild). One sentence:
+Debian ships `libbluetooth.a` but compiles it without `-fPIC`, which
+breaks our PIE binaries on 32-bit ARM. We rebuild the same 3 source
+files Debian used, with `-fPIC`, and install over the distro one.
+
+### Step 9: `Build SBFspot (+ daemon if applicable)`
+
+The actual build. `cd /src/SBFspot && make $target LDFLAGS=…` inside
+the chroot, with our constructed LDFLAGS string passed explicitly.
+`make` runs g++ (which is actually our wrapper → real g++ with extra
+compile flags) on every `.cpp`, then links the `.o` files into the
+final binary with the hardening link flags we pass.
+
+`readelf -d` is run on the binary immediately, showing the dynamic
+section's `NEEDED` entries so you can see in the log which shared
+libraries the binary requires.
+
+For cells where `has_daemon: true`, the same dance is repeated for
+`SBFspotUploadDaemon` from `/src/SBFspotUploadDaemon`.
+
+Rationale for the link flags in [§5](#5-why-each-link-flag).
+
+### Step 10: `Smoke test — binary runs and reports version`
+
+Actually executes the freshly-built binary in the chroot:
+
+```
+./sqlite/bin/SBFspot --version
+```
+
+We want the log to contain "SBFspot V3.9.12" + the architecture
+banner. For armhf cells this is running 32-bit ARM code on
+aarch64 silicon — the CPU's AArch32 mode. If anything is wrong
+(missing library, broken linker script, hardening flag that aborts
+startup), this step catches it before we waste time on the compare.
+
+Also runs `readelf -l | grep GNU_RELRO|GNU_STACK|PIE|INTERP` and
+`readelf -d | grep BIND_NOW|FLAGS_1` to confirm the hardening flags
+took effect.
+
+### Step 11: `Download upstream asset` + `Normalised-ELF compare + report`
+
+Fetches the official tarball for this cell from
+`https://api.github.com/repos/SBFspot/SBFspot/releases/tags/V3.9.12`,
+unpacks it, and compares sizes between our just-built binary and
+upstream's.
+
+**Normalisation** means: we copy both binaries, then run
+`strip --strip-all` and `objcopy --remove-section=.comment
+--remove-section=.note.gnu.build-id` on both copies. That removes
+metadata that's guaranteed to differ (build timestamps, debug symbols,
+SHA1 build-IDs, compiler-version strings) so the compare reflects
+the *code* difference, not formatting.
+
+If sizes/hashes match: `::notice title=<cell>::<bin> MATCH size=…`
+shows up as a green annotation.
+If they differ: `::warning title=<cell>::<bin> residual=<N> B`
+shows the byte-delta. Both warnings and notices are informational in
+Phase 5e — we're not failing the run on them anymore.
+
+### Step 12: `Upload per-cell artefacts`
+
+Tars up `./out/` (which has `out/ours/`, `out/upstream/`,
+`out/summary.txt`) as an artefact named `phase5e-<cell-id>`.
+`actions/upload-artifact@v7` handles the upload. 90-day retention.
+
+That's the whole pipeline. The next three sections explain *why*
+each compile/link/libbluetooth choice is what it is.
 
 ## 4. Why each compile flag
 
