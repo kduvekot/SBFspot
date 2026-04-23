@@ -207,7 +207,7 @@ that don't need re-running.
 
 ## 3. Step-by-step walkthrough
 
-Every cell runs the same 11 steps. Here's what each one does, in
+Every cell runs the same 13 steps. Here's what each one does, in
 order, in plain language. Flag rationale is in sections 4–6; this
 section is just "what happens when."
 
@@ -240,14 +240,32 @@ Uses `actions/checkout@v6` to clone the *upstream* SBFspot repo
 (`SBFspot/SBFspot`) at tag `V3.9.12` into `./upstream/`. Not our
 fork — we want the exact upstream source we're trying to reproduce.
 
-### Step 5: `Stage source tree inside rootfs`
+### Step 5: `Derive SOURCE_DATE_EPOCH from release tag`
+
+Reads the commit timestamp of the V3.9.12 tag
+(`git -C upstream log -1 --pretty=%ct V3.9.12`) and exports it to
+`$GITHUB_ENV` so every subsequent step sees it in the environment.
+
+`SOURCE_DATE_EPOCH` is a
+[reproducible-builds.org convention](https://reproducible-builds.org/docs/source-date-epoch/):
+a single Unix timestamp that build tools substitute for "now"
+wherever they'd otherwise embed a build-time date. `gcc` respects it
+for `__DATE__`/`__TIME__` macros, `tar` for `--mtime=@$SOURCE_DATE_EPOCH`,
+`gzip` via `-n`, `ar` + `objcopy` (binutils ≥ 2.35) for embedded
+timestamps in archives and build-IDs.
+
+The value is derived from the tag itself, not configured separately:
+same input (tagged commit) → same output (tarball), forever. See
+[§10](#10-reproducibility-guarantees) for what we do with it.
+
+### Step 6: `Stage source tree inside rootfs`
 
 `cp -a upstream/SBFspot rootfs/src/` and the same for
 `SBFspotUploadCommon` (and `SBFspotUploadDaemon` if the cell has
 a daemon — `nosql` doesn't). After this, the source is inside the
 chroot, ready to compile with the chroot's g++.
 
-### Step 6: `Install hardened compiler wrapper`
+### Step 7: `Install hardened compiler wrapper`
 
 This one's sneaky. We `sudo tee rootfs/usr/local/bin/g++` to create
 a small shell script that *intercepts* calls to `g++` inside the
@@ -274,7 +292,7 @@ hardening flags.
 
 Rationale for each flag is in [§4](#4-why-each-compile-flag).
 
-### Step 7: `Install build deps in chroot`
+### Step 8: `Install build deps in chroot`
 
 Enters the chroot with `sudo chroot rootfs /bin/sh`, runs
 `apt-get install` for:
@@ -289,14 +307,14 @@ Enters the chroot with `sudo chroot rootfs /bin/sh`, runs
   upload daemon only).
 - `binutils`, `file` — for inspecting the built binary.
 
-### Step 8: `Build PIC libbluetooth.a from distro bluez source`
+### Step 9: `Build PIC libbluetooth.a from distro bluez source`
 
 Deep-dive in [§6](#6-the-pic-libbluetooth-rebuild). One sentence:
 Debian ships `libbluetooth.a` but compiles it without `-fPIC`, which
 breaks our PIE binaries on 32-bit ARM. We rebuild the same 3 source
 files Debian used, with `-fPIC`, and install over the distro one.
 
-### Step 9: `Build SBFspot (+ daemon if applicable)`
+### Step 10: `Build SBFspot (+ daemon if applicable)`
 
 The actual build. `cd /src/SBFspot && make $target LDFLAGS=…` inside
 the chroot, with our constructed LDFLAGS string passed explicitly.
@@ -313,7 +331,7 @@ For cells where `has_daemon: true`, the same dance is repeated for
 
 Rationale for the link flags in [§5](#5-why-each-link-flag).
 
-### Step 10: `Smoke test — binary runs and reports version`
+### Step 11: `Smoke test — binary runs and reports version`
 
 Actually executes the freshly-built binary in the chroot:
 
@@ -331,7 +349,7 @@ Also runs `readelf -l | grep GNU_RELRO|GNU_STACK|PIE|INTERP` and
 `readelf -d | grep BIND_NOW|FLAGS_1` to confirm the hardening flags
 took effect.
 
-### Step 11: `Download upstream asset` + `Normalised-ELF compare + report`
+### Step 12: `Download upstream asset` + `Normalised-ELF compare + report`
 
 Fetches the official tarball for this cell from
 `https://api.github.com/repos/SBFspot/SBFspot/releases/tags/V3.9.12`,
@@ -351,11 +369,49 @@ If they differ: `::warning title=<cell>::<bin> residual=<N> B`
 shows the byte-delta. Both warnings and notices are informational in
 Phase 5e — we're not failing the run on them anymore.
 
-### Step 12: `Upload per-cell artefacts`
+### Step 13: `Assemble reproducible release tarball`
 
-Tars up `./out/` (which has `out/ours/`, `out/upstream/`,
-`out/summary.txt`) as an artefact named `phase5e-<cell-id>`.
-`actions/upload-artifact@v7` handles the upload. 90-day retention.
+Takes the fresh binary (+ daemon where applicable) + the
+non-binary data files from the tagged source tree, stages them in
+a temporary directory with sensible modes (0755 binaries / 0644
+data), and `tar`s the lot up deterministically.
+
+Tar flags chosen for reproducibility:
+- `--sort=name` — member order is fixed (lexicographic).
+- `--owner=0 --group=0 --numeric-owner` — no host-specific uid/gid.
+- `--mtime=@${SOURCE_DATE_EPOCH}` — every member has the tag's commit time.
+- `--format=ustar` — the old POSIX tar format, no GNU extensions
+  that could shift across tar versions.
+
+Piped into `gzip -n`, which skips the gzip-header "original filename"
+and "modification time" fields (otherwise gzip embeds its own
+wall-clock `mtime`).
+
+Result: `out/tarballs/sbfspot-<db>-<arch>-linux-<codename>.tar.gz` —
+byte-identical across runs given identical inputs. See
+[§10](#10-reproducibility-guarantees) for measurement.
+
+Per-variant member list:
+- **nosql** (9 members): `SBFspot` + `SBFspot.default.cfg` +
+  `date_time_zonespec.csv` + 6× `TagListXX-XX.txt`.
+- **sqlite** (12): nosql set + `SBFspotUploadDaemon` +
+  `SBFspotUpload.default.cfg` + `CreateSQLiteDB.sql`.
+- **mariadb** (13): nosql set + `SBFspotUploadDaemon` +
+  `SBFspotUpload.default.cfg` + `CreateMySQLDB.sql` +
+  `CreateMySQLUser.sql`.
+
+Two files get renamed during staging: `SBFspot.cfg` →
+`SBFspot.default.cfg` and `SBFspotUpload.cfg` →
+`SBFspotUpload.default.cfg`. Upstream convention: "default" in the
+filename so `sbfspot-config`'s install flow doesn't overwrite a
+user's edited copy on upgrade.
+
+### Step 14: `Upload per-cell artefacts`
+
+Tars up `./out/` (which now has `out/ours/`, `out/upstream/`,
+`out/tarballs/`, `out/summary.txt`) as an artefact named
+`phase5e-<cell-id>`. `actions/upload-artifact@v7` handles the upload.
+90-day retention.
 
 That's the whole pipeline. The next three sections explain *why*
 each compile/link/libbluetooth choice is what it is.
