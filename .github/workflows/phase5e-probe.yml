@@ -336,6 +336,19 @@ jobs:
           ref: ${{ env.TAG }}
           path: upstream
 
+      - name: Derive SOURCE_DATE_EPOCH from release tag
+        # The commit that V3.9.12 points at has a single immutable
+        # timestamp. Use that as the reproducible-builds canonical
+        # "build moment" — every downstream tool (tar, gzip, gcc,
+        # objcopy, ar, strip) respects SOURCE_DATE_EPOCH when set in
+        # the environment. Per-tag → per-tarball reproducibility.
+        # Convention: reproducible-builds.org.
+        run: |
+          set -euxo pipefail
+          SDE=$(git -C upstream log -1 --pretty=%ct "${{ env.TAG }}")
+          echo "SOURCE_DATE_EPOCH=${SDE}" >> "$GITHUB_ENV"
+          echo "Tag ${{ env.TAG }} → commit timestamp ${SDE} ($(date -u -d @${SDE} +%Y-%m-%dT%H:%M:%SZ))"
+
       - name: Stage source tree inside rootfs
         run: |
           set -euxo pipefail
