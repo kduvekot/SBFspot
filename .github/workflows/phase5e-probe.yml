@@ -544,6 +544,71 @@ jobs:
           } > out/summary.txt
           cat out/summary.txt
 
+      - name: Assemble reproducible release tarball
+        # Builds sbfspot-<db>-<arch>-linux-<codename>.tar.gz from our
+        # freshly-built binaries + the source-tree data files. See
+        # phase5e-probe.md §3 (step 13) for the full member list and
+        # .md §10 for reproducibility guarantees. All mtimes stamped
+        # from SOURCE_DATE_EPOCH; deterministic tar (ustar, sorted,
+        # uid/gid 0) + deterministic gzip (`gzip -n` = no timestamp).
+        # Rebuilding V3.9.12 in six months from this workflow
+        # produces a byte-identical tarball.
+        run: |
+          set -euxo pipefail
+          DB='${{ matrix.cell.db }}'
+          ARCH='${{ matrix.cell.debarch }}'
+          [ "$ARCH" = "armhf" ] && ARCH=arm
+          CODENAME='${{ matrix.cell.codename }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          OUTNAME="sbfspot-${DB}-${ARCH}-linux-${CODENAME}.tar.gz"
+          STAGE="$(mktemp -d)/sbfspot"
+          mkdir -p "$STAGE"
+          # Non-binary data files (byte-identical across all 15 tarballs,
+          # per Phase 1 fingerprint). Copy from the tagged source tree.
+          cp upstream/SBFspot/date_time_zonespec.csv "$STAGE/"
+          cp upstream/SBFspot/TagList*.txt           "$STAGE/"
+          cp upstream/SBFspot/SBFspot.cfg            "$STAGE/SBFspot.default.cfg"
+          # Variant-specific SQL schemas + daemon config
+          if [ "$DB" = "sqlite" ]; then
+            cp upstream/SBFspot/CreateSQLiteDB.sql   "$STAGE/"
+          fi
+          if [ "$DB" = "mariadb" ]; then
+            cp upstream/SBFspot/CreateMySQLDB.sql    "$STAGE/"
+            cp upstream/SBFspot/CreateMySQLUser.sql  "$STAGE/"
+          fi
+          if [ "$HAS_DAEMON" = "true" ]; then
+            cp upstream/SBFspotUploadDaemon/SBFspotUpload.cfg "$STAGE/SBFspotUpload.default.cfg"
+          fi
+          # Our freshly-built binaries
+          cp out/ours/SBFspot "$STAGE/"
+          if [ "$HAS_DAEMON" = "true" ]; then
+            cp out/ours/SBFspotUploadDaemon "$STAGE/"
+          fi
+          # Sensible modes: 0755 for executables, 0644 for data.
+          # Upstream uses 0777 everywhere; we choose modern convention.
+          chmod 0755 "$STAGE/SBFspot"
+          [ -f "$STAGE/SBFspotUploadDaemon" ] && chmod 0755 "$STAGE/SBFspotUploadDaemon"
+          find "$STAGE" -type f ! -name SBFspot ! -name SBFspotUploadDaemon \
+            -exec chmod 0644 {} +
+          echo "=== staged for ${OUTNAME} ==="
+          ls -la "$STAGE/"
+          # Reproducible tar: members at archive root (upstream layout),
+          # sorted lexicographically, zero uid/gid, every mtime stamped
+          # from SOURCE_DATE_EPOCH, ustar format. Gzip without embedding
+          # its own timestamp (gzip -n).
+          mkdir -p out/tarballs
+          ( cd "$STAGE" && tar \
+              --sort=name \
+              --owner=0 --group=0 --numeric-owner \
+              --mtime="@${SOURCE_DATE_EPOCH}" \
+              --format=ustar \
+              -cf - -- * ) \
+            | gzip -n > "out/tarballs/${OUTNAME}"
+          echo "=== ${OUTNAME} built ==="
+          ls -la "out/tarballs/${OUTNAME}"
+          sha256sum "out/tarballs/${OUTNAME}"
+          tar -tvf "out/tarballs/${OUTNAME}"
+
       - name: Upload per-cell artefacts
         if: always()
         uses: actions/upload-artifact@v7
