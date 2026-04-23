@@ -737,8 +737,8 @@ C++ ABI changes between gcc versions for armhf; it's cosmetic.
 
 ## 5. Why each link flag
 
-LDFLAGS for each cell is built in step 9 of the workflow from three
-pieces:
+LDFLAGS for each cell is built in step 10 of the workflow from
+three pieces:
 
 ```
 SBFSPOT_LDFLAGS = $common_ldflags $HARDEN $sbfspot_extra
@@ -835,9 +835,12 @@ segment with flags `RW` (not `RWE`).
 the stack. Modern kernels already enforce NX stacks by default on
 x86_64/aarch64, but the flag must be on the binary to be honoured.
 
-**Fun history:** C code that nests functions (a GCC extension) or
-uses `__builtin_trampoline` can force the stack executable. SBFspot
-doesn't use those, so the flag is safe.
+**Fun history:** C code that uses GCC's
+[nested-functions extension](https://gcc.gnu.org/onlinedocs/gcc/Nested-Functions.html)
+triggers an executable-stack requirement — the compiler emits a
+trampoline on the stack for the inner function's closure. Linking
+any object compiled with nested functions flips `PT_GNU_STACK` to
+`RWE`. SBFspot doesn't use nested functions, so the flag is safe.
 
 ### `-Wl,--build-id=sha1`
 
@@ -868,13 +871,17 @@ better for forensics.
   everything that comes after.
 
 **Why static libbluetooth:** matches upstream's output. All 15
-upstream binaries have libbluetooth statically embedded (no
-`libbluetooth.so.3` in NEEDED). This is a *portability* property
-— it means users don't need the `bluez` package installed on their
-target system. Rasperry Pi OS Lite doesn't include bluez by default,
-and `sbfspot-config` (upstream's installer) doesn't install it
-either. If our binary dynamically linked libbluetooth, users on
-Pi OS Lite couldn't even `exec` the binary.
+upstream binaries have libbluetooth statically embedded —
+`readelf -d <upstream-binary> | grep libbluetooth` returns nothing
+on any of them (verifiable on the V3.9.12 release assets). This
+is a *portability* property: it means users don't need the `bluez`
+package installed on their target system. Raspberry Pi OS Lite
+images are minimal and historically ship without `libbluetooth3`
+pre-installed, and `sbfspot-config` (upstream's installer) does
+not install it either (grep the installer script for `bluetooth`
+or `libbluetooth` — zero matches against `install_pkg`). If our
+binary dynamically linked libbluetooth, users on such a system
+would hit a missing-library error at `exec` time.
 
 **Why it's in `sbfspot_extra` and not `common_ldflags`:** the
 daemon doesn't use libbluetooth, only SBFspot itself does. Keeping
