@@ -97,7 +97,113 @@ gate.
 
 ## 2. The shape of a run
 
-*TBD*
+### Runners
+
+A **runner** in GitHub Actions is just a Linux VM that GitHub starts
+up for the duration of a job. When we write:
+
+```yaml
+runs-on: ubuntu-24.04-arm
+```
+
+we're saying "give me a freshly-booted Ubuntu 24.04 VM whose CPU is
+**aarch64** (64-bit ARM)." This is a real hardware VM on Azure's
+Ampere Altra silicon, not an emulated one. That matters because:
+
+- 64-bit ARM chips can execute 32-bit ARM (armhf) binaries
+  **natively** via the AArch32 execution mode built into the CPU.
+  So a single runner can build and test *both* our arm64 and our
+  armhf cells, with no QEMU emulation slowing things down.
+- We verified this experimentally in Phase 0
+  ([`../docs/` via CLAUDE.md](../CLAUDE.md)); a 32-bit armhf `gcc`
+  runs on this silicon and produces binaries that execute there too.
+
+### Chroots via `debootstrap`
+
+Debian/Raspbian ship new library versions every release. Upstream's
+`buster` tarball is linked against buster's libboost, buster's
+libsqlite3, buster's glibc. We can't build a buster tarball on a
+bookworm host and expect the library versions to match.
+
+So for each cell, we create a **chroot** — short for "change root" —
+a self-contained tree that looks like a fresh minimal Debian install
+of the cell's target codename. The command that builds it is
+[`debootstrap`](https://wiki.debian.org/Debootstrap):
+
+```
+sudo debootstrap --arch=armhf --variant=minbase \
+    --keyring=$KEYRING --include=ca-certificates \
+    bookworm rootfs/ http://archive.raspbian.org/raspbian
+```
+
+That downloads all of bookworm-armhf's base packages into `./rootfs/`.
+After that, `sudo chroot rootfs /bin/sh` drops you into a shell
+where `/usr/lib`, `/usr/bin`, and `gcc` are **bookworm-armhf's**, not
+the host's. It's isolation without the overhead of a full container.
+
+### Mirrors
+
+`debootstrap` pulls packages from a mirror URL. We use three:
+
+| Mirror | For which cells | Why |
+|---|---|---|
+| `http://archive.raspbian.org/raspbian` | arm × {bullseye, bookworm} | Current Raspbian archive. Upstream's armhf binaries are Raspbian-flavoured (`.comment` says `GCC: (Raspbian X+rpi1)`), so we use Raspbian too. |
+| `http://legacy.raspbian.org/raspbian` | arm × buster | Raspbian dropped buster from the live archive; legacy mirror still serves it. |
+| `http://snapshot.debian.org/archive/debian/20250222T000000Z` | arm64 × all | Debian's snapshot service, pinned to the date upstream released V3.9.12. Arm64 binaries are Debian, not Raspbian. |
+
+Raspbian doesn't have a snapshot service that works (Phase 0 finding),
+so we accept the live archive's natural drift over time. If bookworm
+library versions shift, our binaries shift with them — same as
+upstream's would if they rebuilt today.
+
+### The 15-cell matrix
+
+A GitHub Actions **matrix** is an instruction that says "run this job
+N times with different inputs." Our matrix block has one row per
+cell:
+
+```yaml
+strategy:
+  fail-fast: false      # don't cancel sibling cells if one fails
+  matrix:
+    cell:
+      - id: sqlite-arm-buster
+        codename: buster
+        debarch: armhf
+        ...
+      - id: nosql-arm-buster
+        ...
+      # 13 more
+```
+
+GitHub takes that list, creates 15 independent jobs, and schedules
+them in parallel. Each job gets a fresh `ubuntu-24.04-arm` runner
+and runs the same set of steps — but with different matrix values
+filled in via `${{ matrix.cell.codename }}`, etc.
+
+Wall-clock per full matrix run: 3–5 minutes. Every cell does its own
+debootstrap + compile + link + smoke-test independently.
+
+### Triggering the workflow
+
+The workflow has two triggers:
+
+```yaml
+on:
+  workflow_dispatch:           # "Run workflow" button in the UI
+  push:
+    branches: [claude/add-ci-release-pipeline-QKIcZ]
+    paths: [.github/workflows/.phase5e-probe-trigger]
+```
+
+That `paths:` filter is the "frozen probe" gate explained in
+[`README.md`](README.md): the workflow only runs on push if the
+trigger file itself changed. Touching its timestamp
+(`date -u +"%Y-%m-%dT%H:%M:%SZ" > .phase5e-probe-trigger`) is enough
+to fire it.
+
+We do this so day-to-day commits don't consume CI minutes on probes
+that don't need re-running.
 
 ## 3. Step-by-step walkthrough
 
