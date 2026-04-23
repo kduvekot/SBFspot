@@ -815,7 +815,64 @@ compile + install. Tiny compared to the ~90 s debootstrap.
 
 ## 7. Per-cell matrix table
 
-*TBD*
+All 15 cells. Columns that are identical on every cell are omitted
+(see "shared across all cells" below the table).
+
+| cell id | codename | debarch | triplet | mirror | db_pkgs | curl_pkg | daemon |
+|---|---|---|---|---|---|---|---|
+| `sqlite-arm-buster` | buster | armhf | arm-linux-gnueabihf | raspbian-legacy | `libsqlite3-dev` | `libcurl4-gnutls-dev` | ✓ |
+| `nosql-arm-buster` | buster | armhf | arm-linux-gnueabihf | raspbian-legacy | — | — | ✗ |
+| `mariadb-arm-buster` | buster | armhf | arm-linux-gnueabihf | raspbian-legacy | `libmariadb-dev libmariadb-dev-compat` | `libcurl4-gnutls-dev` | ✓ |
+| `sqlite-arm-bullseye` | bullseye | armhf | arm-linux-gnueabihf | raspbian | `libsqlite3-dev` | `libcurl4-openssl-dev` | ✓ |
+| `nosql-arm-bullseye` | bullseye | armhf | arm-linux-gnueabihf | raspbian | — | — | ✗ |
+| `mariadb-arm-bullseye` | bullseye | armhf | arm-linux-gnueabihf | raspbian | `libmariadb-dev libmariadb-dev-compat` | `libcurl4-openssl-dev` | ✓ |
+| `sqlite-arm-bookworm` | bookworm | armhf | arm-linux-gnueabihf | raspbian | `libsqlite3-dev` | `libcurl4-openssl-dev` | ✓ |
+| `nosql-arm-bookworm` | bookworm | armhf | arm-linux-gnueabihf | raspbian | — | — | ✗ |
+| `mariadb-arm-bookworm` | bookworm | armhf | arm-linux-gnueabihf | raspbian | `libmariadb-dev libmariadb-dev-compat` | `libcurl4-openssl-dev` | ✓ |
+| `sqlite-arm64-bullseye` | bullseye | arm64 | aarch64-linux-gnu | debian | `libsqlite3-dev` | `libcurl4-openssl-dev` | ✓ |
+| `nosql-arm64-bullseye` | bullseye | arm64 | aarch64-linux-gnu | debian | — | — | ✗ |
+| `mariadb-arm64-bullseye` | bullseye | arm64 | aarch64-linux-gnu | debian | `libmariadb-dev libmariadb-dev-compat` | `libcurl4-openssl-dev` | ✓ |
+| `sqlite-arm64-bookworm` | bookworm | arm64 | aarch64-linux-gnu | debian | `libsqlite3-dev` | `libcurl4-openssl-dev` | ✓ |
+| `nosql-arm64-bookworm` | bookworm | arm64 | aarch64-linux-gnu | debian | — | — | ✗ |
+| `mariadb-arm64-bookworm` | bookworm | arm64 | aarch64-linux-gnu | debian | `libmariadb-dev libmariadb-dev-compat` | `libcurl4-openssl-dev` | ✓ |
+
+### Shared across all cells
+
+- `common_ldflags: '-s -Wl,--as-needed'`
+- `sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'`
+- `daemon_extra: ''` (empty)
+- `HARDEN` (appended in step 9):
+  `-pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--build-id=sha1`
+
+### Per-cell `prefix` for `-fmacro-prefix-map`
+
+The prefix-map (see §4) differs per cell because upstream's cross-
+toolchain uses a different sysroot path per codename. These
+strings were extracted from the `.rodata` of upstream's binaries
+in Phase 3.4 by grep'ing for `d:\rpi\cross\`:
+
+| codename × arch | prefix |
+|---|---|
+| arm × buster | `d:\rpi\cross\buster\gcc8.3.0\arm-linux-gnueabihf\sysroot\usr\include` |
+| arm × bullseye | `d:\rpi\cross\bullseye\gcc10.2.1\arm-linux-gnueabihf\sysroot\usr\include` |
+| arm × bookworm | `d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include` |
+| arm64 × bullseye | `d:\rpi\cross\bullseye64\gcc10.2.1\aarch64-linux-gnu\sysroot\usr\include` |
+| arm64 × bookworm | `d:\rpi\cross\bookworm64\gcc12.2.0\aarch64-linux-gnu\sysroot\usr\include` |
+
+Note the `rpi1` rpi-custom-toolchain suffix is missing on our
+chroots (stock Debian/Raspbian `.comment` says `Raspbian 12.2.0-14+rpi1`
+but we build via distro gcc directly without the `+rpi1` in our
+version string). That's fine for functionality; it's one of the
+documented Phase 3.5 residuals.
+
+### `asset_name` + `asset_sha256`
+
+Each cell knows the filename + SHA256 of its upstream tarball so
+step 11 can download and verify it before the compare. These are
+the exact values from the V3.9.12 release page and shouldn't
+change unless upstream re-cuts the release.
+
+Full list in the YAML; not repeated here for brevity.
 
 ## 8. Things we tried and dropped
 
