@@ -16,17 +16,22 @@ master pushes and pull requests it builds the same set for
 validation without publishing.
 
 **What it deliberately does not do.** It does not match upstream's
-earlier hand-built binaries byte-for-byte. Upstream's Windows
-cross-toolchain embedded a different `libstdc++` than Debian/Raspbian
-ships, and upstream's 7-Zip gzip writer produced different gzip
-header bytes than Linux `gzip`. Both are cosmetic — they do not
-affect functional behaviour — and both require private artefacts
-to reproduce. This pipeline trades byte-parity-with-the-past for
-modern hardening flags (PIE + full RELRO + BIND_NOW +
-`_FORTIFY_SOURCE=2` + `-fstack-protector-strong` +
-`-D_GLIBCXX_ASSERTIONS` + deterministic `--build-id=sha1`), a clean
-runtime-dependency surface, and long-term reproducibility anchored
-to the git tag.
+earlier hand-built binaries byte-for-byte. On `arm × bookworm`
+cells specifically, upstream's cross-toolchain produced a
+`libstdc++` whose object bytes differ from Debian/Raspbian's shipped
+`libstdc++` (~16 KB of code-gen drift, characterised by the prior
+investigation but not reproducible without access to the
+maintainer's toolchain). Separately, the historical tarballs' gzip
+headers are Windows-flavoured — `OS=0x00` (FAT filesystem byte)
+and `XFL=0x04` (`gzip --fast`) — which Linux `gzip -n` cannot
+produce regardless of input. Both deltas are cosmetic: they do
+not affect what the binary does when it runs. This pipeline trades
+byte-parity-with-the-past for modern hardening flags (PIE + full
+RELRO + BIND_NOW + `_FORTIFY_SOURCE=2` + `-fstack-protector-strong`
++ `-D_GLIBCXX_ASSERTIONS` + deterministic `--build-id=sha1`), a
+clean runtime-dependency surface, and long-term reproducibility
+anchored to the git tag (see [§9](#9-reproducibility-guarantees)
+for the exact guarantee and its caveats).
 
 ---
 
@@ -69,13 +74,19 @@ sibling `windows-release.yml` would be the natural home.
 
 Two properties the hand-built process didn't give us:
 
-- **Auditable.** Every flag, every library version, every step of
-  the build is visible in the workflow file and the run log. A
-  third-party reviewer can point at any byte of the output binary
-  and trace it back to a line of YAML.
-- **Reproducible.** The same git tag, fed into the same workflow,
-  produces byte-identical tarballs now and years from now. No
-  reliance on one person's disk image.
+- **Auditable.** Every flag, every step, every library version
+  installed in each chroot is visible in the workflow file, the
+  run log, and the per-cell SBOM. A third-party reviewer can
+  follow the provenance from git tag → workflow → toolchain +
+  libraries → output bytes.
+- **Reproducible.** For a given git tag, the same workflow
+  produces byte-identical tarballs when re-run minutes or days
+  apart (proven by construction and measured; see §9). Long-term
+  reproducibility is arch-dependent: arm64 cells pin to
+  `snapshot.debian.org` and stay stable indefinitely; arm cells
+  pull from a live Raspbian archive and will shift as Raspbian
+  pushes security updates, with the per-cell SBOM capturing
+  exactly what was installed at build time.
 
 ### What it produces per cell
 
