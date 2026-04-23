@@ -1,0 +1,597 @@
+name: Linux release pipeline
+
+# Reproducible rebuild of the 15 Linux release tarballs
+# (sbfspot-<db>-<arch>-linux-<codename>.tar.gz) for every combination
+# of {sqlite, nosql, mariadb} × {buster, bullseye, bookworm} × {arm,
+# arm64}, minus buster × arm64 (never shipped upstream).
+#
+# Full rationale for every compile flag, link flag, and per-cell
+# matrix value is in the companion doc:
+#
+#     .github/workflows/linux-release.md
+#
+# …including things we tried and dropped (dynamic libbluetooth,
+# non-PIE armhf) and a glossary for concepts like PIC, TEXTREL,
+# RELRO, BIND_NOW.
+#
+# Trigger model:
+#   - push to a V3.9.* tag  → full build + attach tarballs to the
+#                             matching GitHub Release
+#   - push to master        → full build, workflow-run artefacts only
+#   - pull_request          → full build, workflow-run artefacts only
+#   - workflow_dispatch     → manual run, workflow-run artefacts only
+
+on:
+  push:
+    branches: [master]
+    tags: ['V3.9.*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to attach assets to GitHub Releases on tag push
+
+jobs:
+  build-matrix:
+    name: "${{ matrix.cell.id }}"
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cell:
+          # ========= arm × buster (all DBs) =========
+          - id: sqlite-arm-buster
+            codename: buster
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: sqlite
+            make_target: sqlite
+            mirror: raspbian-legacy
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-gnutls-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: nosql-arm-buster
+            codename: buster
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: nosql
+            make_target: nosql
+            mirror: raspbian-legacy
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm-buster
+            codename: buster
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: mariadb
+            make_target: mariadb
+            mirror: raspbian-legacy
+            # buster's libmariadb3 is built against gnutls, not openssl,
+            # so libcurl4-gnutls-dev matches the system-installed curl ABI.
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            curl_pkg: 'libcurl4-gnutls-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+
+          # ========= arm × bullseye (all DBs) =========
+          - id: sqlite-arm-bullseye
+            codename: bullseye
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: sqlite
+            make_target: sqlite
+            mirror: raspbian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: nosql-arm-bullseye
+            codename: bullseye
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: nosql
+            make_target: nosql
+            mirror: raspbian
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm-bullseye
+            codename: bullseye
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: mariadb
+            make_target: mariadb
+            mirror: raspbian
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+
+          # ========= arm × bookworm (all DBs) =========
+          - id: sqlite-arm-bookworm
+            codename: bookworm
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: sqlite
+            make_target: sqlite
+            mirror: raspbian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: nosql-arm-bookworm
+            codename: bookworm
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: nosql
+            make_target: nosql
+            mirror: raspbian
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm-bookworm
+            codename: bookworm
+            debarch: armhf
+            triplet: arm-linux-gnueabihf
+            db: mariadb
+            make_target: mariadb
+            mirror: raspbian
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+
+          # ========= arm64 × bullseye (all DBs) =========
+          - id: sqlite-arm64-bullseye
+            codename: bullseye
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: sqlite
+            make_target: sqlite
+            mirror: debian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: nosql-arm64-bullseye
+            codename: bullseye
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: nosql
+            make_target: nosql
+            mirror: debian
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm64-bullseye
+            codename: bullseye
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: mariadb
+            make_target: mariadb
+            mirror: debian
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+
+          # ========= arm64 × bookworm (all DBs) =========
+          - id: sqlite-arm64-bookworm
+            codename: bookworm
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: sqlite
+            make_target: sqlite
+            mirror: debian
+            db_pkgs: 'libsqlite3-dev'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: nosql-arm64-bookworm
+            codename: bookworm
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: nosql
+            make_target: nosql
+            mirror: debian
+            db_pkgs: ''
+            curl_pkg: ''
+            has_daemon: false
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+          - id: mariadb-arm64-bookworm
+            codename: bookworm
+            debarch: arm64
+            triplet: aarch64-linux-gnu
+            db: mariadb
+            make_target: mariadb
+            mirror: debian
+            db_pkgs: 'libmariadb-dev libmariadb-dev-compat'
+            curl_pkg: 'libcurl4-openssl-dev'
+            has_daemon: true
+            common_ldflags: '-Wl,--as-needed'
+            sbfspot_extra: '-Wl,-Bstatic -lbluetooth -Wl,-Bdynamic'
+            daemon_extra: ''
+
+    steps:
+      - name: Install host-side tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap xxd binutils file curl jq debian-archive-keyring
+
+      - name: Fetch Raspbian keyring (if applicable)
+        if: matrix.cell.mirror == 'raspbian' || matrix.cell.mirror == 'raspbian-legacy'
+        run: |
+          set -euxo pipefail
+          mkdir -p keyring
+          curl -sSL https://archive.raspbian.org/raspbian.public.key \
+            -o keyring/raspbian.asc
+          gpg --dearmor < keyring/raspbian.asc > keyring/raspbian.gpg
+
+      - name: Debootstrap rootfs
+        run: |
+          set -euxo pipefail
+          case "${{ matrix.cell.mirror }}" in
+            raspbian)
+              MIRROR="http://archive.raspbian.org/raspbian"
+              KEYRING="$PWD/keyring/raspbian.gpg"
+              ;;
+            raspbian-legacy)
+              MIRROR="http://legacy.raspbian.org/raspbian"
+              KEYRING="$PWD/keyring/raspbian.gpg"
+              ;;
+            debian)
+              MIRROR="http://snapshot.debian.org/archive/debian/20250222T000000Z"
+              KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
+              ;;
+          esac
+          sudo debootstrap \
+            --arch=${{ matrix.cell.debarch }} \
+            --variant=minbase \
+            --keyring="$KEYRING" \
+            --include=ca-certificates \
+            "${{ matrix.cell.codename }}" \
+            rootfs "$MIRROR"
+
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          path: src
+
+      - name: Derive SOURCE_DATE_EPOCH from triggering commit
+        # The commit that triggered this run has a single immutable
+        # timestamp. Use that as the reproducible-builds canonical
+        # "build moment" — every downstream tool (tar, gzip, gcc,
+        # objcopy, ar, strip) respects SOURCE_DATE_EPOCH when set in
+        # the environment. Per-commit → per-tarball reproducibility.
+        # On tag push, SOURCE_DATE_EPOCH is the tag commit's time and
+        # stays fixed forever; on master/PR builds it follows the HEAD
+        # commit. Convention: reproducible-builds.org.
+        run: |
+          set -euxo pipefail
+          SDE=$(git -C src log -1 --pretty=%ct)
+          echo "SOURCE_DATE_EPOCH=${SDE}" >> "$GITHUB_ENV"
+          echo "Commit timestamp ${SDE} ($(date -u -d @${SDE} +%Y-%m-%dT%H:%M:%SZ))"
+
+      - name: Stage source tree inside rootfs
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p rootfs/src
+          sudo cp -a src/SBFspot             rootfs/src/
+          sudo cp -a src/SBFspotUploadCommon rootfs/src/
+          if [ "${{ matrix.cell.has_daemon }}" = "true" ]; then
+            sudo cp -a src/SBFspotUploadDaemon rootfs/src/
+          fi
+
+      - name: Install hardened compiler wrapper
+        # Modern Debian-equivalent compile flags via a g++ wrapper.
+        # Placed at /usr/local/bin/g++ so it shadows /usr/bin/g++ on
+        # PATH. The real compiler gets called with our extra flags on
+        # every invocation. See linux-release.md §4 for full rationale.
+        # - _FORTIFY_SOURCE=2 : glibc fortified wrappers (runtime bounds checks)
+        # - fstack-protector-strong : stack canaries
+        # - _GLIBCXX_ASSERTIONS : libstdc++ runtime checks
+        # - fPIE : position-independent executable (pairs with -pie in LDFLAGS)
+        # - fmacro-prefix-map : stable __FILE__ paths regardless of builder
+        # - g : DWARF debug info (split into sidecar in a later step)
+        run: |
+          set -euxo pipefail
+          sudo tee rootfs/usr/local/bin/g++ > /dev/null <<'WRAP'
+          #!/bin/sh
+          exec /usr/bin/g++ \
+            '-fmacro-prefix-map=/src=/build/sbfspot' \
+            -D_FORTIFY_SOURCE=2 \
+            -fstack-protector-strong \
+            -D_GLIBCXX_ASSERTIONS \
+            -fPIE \
+            -g \
+            "$@"
+          WRAP
+          sudo chmod +x rootfs/usr/local/bin/g++
+
+      - name: Install build deps in chroot
+        run: |
+          set -euxo pipefail
+          DB_PKGS='${{ matrix.cell.db_pkgs }}'
+          CURL_PKG='${{ matrix.cell.curl_pkg }}'
+          sudo chroot rootfs /bin/sh -euxc "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              g++ make libbluetooth-dev \
+              libboost-date-time-dev libboost-system-dev \
+              binutils file \
+              ${DB_PKGS} ${CURL_PKG}
+            g++ --version | head -1
+          "
+
+      - name: Build PIC libbluetooth.a from distro bluez source
+        run: |
+          set -euxo pipefail
+          TRIPLET='${{ matrix.cell.triplet }}'
+          # Debian/Raspbian ship libbluetooth.a in libbluetooth-dev but
+          # compile it without -fPIC. Static-linking that into a PIE
+          # binary emits DT_TEXTREL on armhf. Rebuild the same 3 source
+          # files Debian's libbluetooth.la uses (Makefile.am:
+          # lib_libbluetooth_la_SOURCES = $lib_headers $lib_sources,
+          # where lib_sources = lib/bluetooth.c lib/hci.c lib/sdp.c),
+          # compiled with -fPIC, and install over the stock .a.
+          sudo chroot rootfs /bin/sh -euxc "
+            # Enable deb-src so apt-get source works
+            sed -n 's/^deb /deb-src /p' /etc/apt/sources.list >> /etc/apt/sources.list
+            apt-get update -qq
+            apt-get install -y --no-install-recommends dpkg-dev
+            mkdir -p /tmp/bluez && cd /tmp/bluez
+            apt-get source bluez
+            cd bluez-*/lib
+            gcc -fPIC -O2 -Wall -I. -c bluetooth.c hci.c sdp.c
+            ar rcs libbluetooth.a bluetooth.o hci.o sdp.o
+            install -m 0644 libbluetooth.a /usr/lib/$TRIPLET/libbluetooth.a
+            echo '=== verify PIC (should show GOT/GOTOFF relocs) ==='
+            readelf -r /usr/lib/$TRIPLET/libbluetooth.a 2>/dev/null \
+              | grep -E 'R_ARM_GOT|R_AARCH64_.*GOT|R_ARM_GOTOFF' \
+              | head -3 || echo 'no GOT relocs found — check -fPIC applied'
+          "
+
+      - name: Build SBFspot (+ daemon if applicable)
+        run: |
+          set -euxo pipefail
+          # Link hardening (see linux-release.md §5):
+          # -pie: produce PIE executable (pairs with -fPIE at compile)
+          # -Wl,-z,relro -Wl,-z,now: full RELRO + immediate binding
+          # -Wl,-z,noexecstack: non-executable stack
+          # -Wl,--build-id=sha1: deterministic build-id hashed from content
+          HARDEN='-pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--build-id=sha1'
+          COMMON="${{ matrix.cell.common_ldflags }} $HARDEN"
+          SBFSPOT_LDFLAGS="${COMMON} ${{ matrix.cell.sbfspot_extra }}"
+          DAEMON_LDFLAGS="${COMMON} ${{ matrix.cell.daemon_extra }}"
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot
+            make $MAKE_TARGET LDFLAGS='$SBFSPOT_LDFLAGS'
+            file $MAKE_TARGET/bin/SBFspot
+            readelf -d $MAKE_TARGET/bin/SBFspot | grep NEEDED || true
+            if [ \"$HAS_DAEMON\" = \"true\" ]; then
+              cd /src/SBFspotUploadDaemon
+              make $MAKE_TARGET LDFLAGS='$DAEMON_LDFLAGS'
+              file $MAKE_TARGET/bin/SBFspotUploadDaemon
+              readelf -d $MAKE_TARGET/bin/SBFspotUploadDaemon | grep NEEDED || true
+            fi
+          "
+
+      - name: Split debug info into .debug sidecars
+        # The build step produced unstripped binaries (LDFLAGS no longer
+        # has -s, and the g++ wrapper appends -g). Now:
+        #   1) --only-keep-debug: extract DWARF into $BIN.debug
+        #   2) --strip-unneeded: strip the binary of debug + symbols
+        #      but keep dynamic-linker-needed symbols
+        #   3) --add-gnu-debuglink: embed a .gnu_debuglink section
+        #      pointing gdb/debuginfod at the sidecar
+        # The main tarball ships the stripped binary; a separate
+        # .debug.tar.gz artefact ships the sidecars. See §3 step 12
+        # and §9 of linux-release.md.
+        run: |
+          set -euxo pipefail
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          sudo chroot rootfs /bin/sh -euxc "
+            cd /src/SBFspot/${MAKE_TARGET}/bin
+            for BIN in SBFspot; do
+              objcopy --only-keep-debug \"\$BIN\" \"\$BIN.debug\"
+              objcopy --strip-unneeded      \"\$BIN\"
+              objcopy --add-gnu-debuglink=\"\$BIN.debug\" \"\$BIN\"
+              chmod 0644 \"\$BIN.debug\"
+              ls -la \"\$BIN\" \"\$BIN.debug\"
+              readelf -S \"\$BIN\" | grep -E 'gnu_debuglink|debug_' | head
+            done
+            if [ \"${HAS_DAEMON}\" = \"true\" ]; then
+              cd /src/SBFspotUploadDaemon/${MAKE_TARGET}/bin
+              for BIN in SBFspotUploadDaemon; do
+                objcopy --only-keep-debug \"\$BIN\" \"\$BIN.debug\"
+                objcopy --strip-unneeded      \"\$BIN\"
+                objcopy --add-gnu-debuglink=\"\$BIN.debug\" \"\$BIN\"
+                chmod 0644 \"\$BIN.debug\"
+                ls -la \"\$BIN\" \"\$BIN.debug\"
+              done
+            fi
+          "
+
+      - name: Smoke test — binary runs and reports version
+        run: |
+          set -uxo pipefail
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          # Run SBFspot --version inside the chroot. armhf runs natively on
+          # ubuntu-24.04-arm (aarch64 hw, AArch32 personality); arm64 is
+          # straight native.
+          echo "=== smoke: SBFspot --version ==="
+          sudo chroot rootfs /bin/sh -c "cd /src/SBFspot && ./$MAKE_TARGET/bin/SBFspot --version 2>&1 || ./$MAKE_TARGET/bin/SBFspot 2>&1 | head -5" | head -10 || true
+          if [ "$HAS_DAEMON" = "true" ]; then
+            echo "=== smoke: SBFspotUploadDaemon --version ==="
+            sudo chroot rootfs /bin/sh -c "cd /src/SBFspotUploadDaemon && ./$MAKE_TARGET/bin/SBFspotUploadDaemon --version 2>&1 || ./$MAKE_TARGET/bin/SBFspotUploadDaemon 2>&1 | head -5" | head -10 || true
+          fi
+          # Verify PIE + RELRO + NX stack via readelf flags
+          echo "=== hardening verification ==="
+          BIN="rootfs/src/SBFspot/$MAKE_TARGET/bin/SBFspot"
+          echo "File type: $(file $BIN | awk -F: '{print $2}')"
+          readelf -l $BIN 2>/dev/null | grep -E 'GNU_RELRO|GNU_STACK|PIE|INTERP' | head -5
+          readelf -d $BIN 2>/dev/null | grep -E 'BIND_NOW|FLAGS_1' | head
+
+      - name: Copy binaries out of the chroot
+        run: |
+          set -euxo pipefail
+          mkdir -p out/bin
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          sudo cp "rootfs/src/SBFspot/${MAKE_TARGET}/bin/SBFspot" out/bin/SBFspot
+          if [ "$HAS_DAEMON" = "true" ]; then
+            sudo cp "rootfs/src/SBFspotUploadDaemon/${MAKE_TARGET}/bin/SBFspotUploadDaemon" \
+                    out/bin/SBFspotUploadDaemon
+          fi
+          sudo chown -R "$USER:$USER" out/bin
+          ls -la out/bin
+
+      - name: Assemble reproducible release tarball
+        # Builds sbfspot-<db>-<arch>-linux-<codename>.tar.gz (main) and
+        # sbfspot-<db>-<arch>-linux-<codename>.debug.tar.gz (DWARF
+        # sidecars) from the freshly-built binaries + the source-tree
+        # data files. See linux-release.md §3 and §9 for full member
+        # list + reproducibility guarantees.
+        # All mtimes stamped from SOURCE_DATE_EPOCH; deterministic tar
+        # (ustar, sorted, uid/gid 0) + deterministic gzip (`gzip -n`).
+        # Rebuilding a tagged commit later produces byte-identical
+        # tarballs.
+        run: |
+          set -euxo pipefail
+          DB='${{ matrix.cell.db }}'
+          ARCH='${{ matrix.cell.debarch }}'
+          [ "$ARCH" = "armhf" ] && ARCH=arm
+          CODENAME='${{ matrix.cell.codename }}'
+          HAS_DAEMON='${{ matrix.cell.has_daemon }}'
+          OUTNAME="sbfspot-${DB}-${ARCH}-linux-${CODENAME}.tar.gz"
+          STAGE="$(mktemp -d)/sbfspot"
+          mkdir -p "$STAGE"
+          # Non-binary data files (byte-identical across all 15 tarballs
+          # — upstream ships one source checkout with no per-variant
+          # processing). Copy from the source tree.
+          cp src/SBFspot/date_time_zonespec.csv "$STAGE/"
+          cp src/SBFspot/TagList*.txt           "$STAGE/"
+          cp src/SBFspot/SBFspot.cfg            "$STAGE/SBFspot.default.cfg"
+          # Variant-specific SQL schemas + daemon config
+          if [ "$DB" = "sqlite" ]; then
+            cp src/SBFspot/CreateSQLiteDB.sql   "$STAGE/"
+          fi
+          if [ "$DB" = "mariadb" ]; then
+            cp src/SBFspot/CreateMySQLDB.sql    "$STAGE/"
+            cp src/SBFspot/CreateMySQLUser.sql  "$STAGE/"
+          fi
+          if [ "$HAS_DAEMON" = "true" ]; then
+            cp src/SBFspotUploadDaemon/SBFspotUpload.cfg "$STAGE/SBFspotUpload.default.cfg"
+          fi
+          # Our freshly-built binaries
+          cp out/bin/SBFspot "$STAGE/"
+          if [ "$HAS_DAEMON" = "true" ]; then
+            cp out/bin/SBFspotUploadDaemon "$STAGE/"
+          fi
+          # Sensible Unix modes: 0755 for executables, 0644 for data.
+          chmod 0755 "$STAGE/SBFspot"
+          [ -f "$STAGE/SBFspotUploadDaemon" ] && chmod 0755 "$STAGE/SBFspotUploadDaemon"
+          find "$STAGE" -type f ! -name SBFspot ! -name SBFspotUploadDaemon \
+            -exec chmod 0644 {} +
+          echo "=== staged for ${OUTNAME} ==="
+          ls -la "$STAGE/"
+          # Reproducible tar: members at archive root, sorted
+          # lexicographically, zero uid/gid, every mtime stamped
+          # from SOURCE_DATE_EPOCH, ustar format. Gzip without
+          # embedding its own timestamp (gzip -n).
+          mkdir -p out/tarballs
+          ( cd "$STAGE" && tar \
+              --sort=name \
+              --owner=0 --group=0 --numeric-owner \
+              --mtime="@${SOURCE_DATE_EPOCH}" \
+              --format=ustar \
+              -cf - -- * ) \
+            | gzip -n > "out/tarballs/${OUTNAME}"
+          echo "=== ${OUTNAME} built ==="
+          ls -la "out/tarballs/${OUTNAME}"
+          sha256sum "out/tarballs/${OUTNAME}"
+          tar -tvf "out/tarballs/${OUTNAME}"
+          # Companion .debug.tar.gz: just the sidecars, same reproducible
+          # tar/gzip convention as above. Consumers who want symbolication
+          # (gdb, debuginfod) grab this; end users never need to.
+          MAKE_TARGET='${{ matrix.cell.make_target }}'
+          DEBUG_OUTNAME="sbfspot-${DB}-${ARCH}-linux-${CODENAME}.debug.tar.gz"
+          DEBUG_STAGE="$(mktemp -d)/sbfspot-debug"
+          mkdir -p "$DEBUG_STAGE"
+          sudo cp "rootfs/src/SBFspot/${MAKE_TARGET}/bin/SBFspot.debug" "$DEBUG_STAGE/"
+          if [ "$HAS_DAEMON" = "true" ]; then
+            sudo cp "rootfs/src/SBFspotUploadDaemon/${MAKE_TARGET}/bin/SBFspotUploadDaemon.debug" "$DEBUG_STAGE/"
+          fi
+          sudo chown -R "$USER:$USER" "$DEBUG_STAGE"
+          chmod 0644 "$DEBUG_STAGE"/*.debug
+          ( cd "$DEBUG_STAGE" && tar \
+              --sort=name \
+              --owner=0 --group=0 --numeric-owner \
+              --mtime="@${SOURCE_DATE_EPOCH}" \
+              --format=ustar \
+              -cf - -- * ) \
+            | gzip -n > "out/tarballs/${DEBUG_OUTNAME}"
+          echo "=== ${DEBUG_OUTNAME} built ==="
+          ls -la "out/tarballs/${DEBUG_OUTNAME}"
+          sha256sum "out/tarballs/${DEBUG_OUTNAME}"
+          tar -tvf "out/tarballs/${DEBUG_OUTNAME}"
+
+      - name: Upload per-cell artefacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbfspot-${{ matrix.cell.id }}
+          path: |
+            out/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Attach tarballs to GitHub Release (tag push only)
+        if: startsWith(github.ref, 'refs/tags/V3.9.')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/tarballs/*.tar.gz
+          fail_on_unmatched_files: true
