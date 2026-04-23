@@ -362,7 +362,142 @@ each compile/link/libbluetooth choice is what it is.
 
 ## 4. Why each compile flag
 
-*TBD*
+These are the flags applied by the `/usr/local/bin/g++` wrapper
+(step 6). They're added to *every* C++ compilation in the build.
+
+### `-fmacro-prefix-map=/usr/include=<upstream-prefix>`
+
+**What it does:** tells the preprocessor "whenever you bake the
+current source file's path into the binary via the `__FILE__` macro,
+substitute `/usr/include` with this other string."
+
+**Why we need it:** C and C++ code can embed its own file paths via
+things like `assert()` macros (which expand to
+`__assert_fail("x != NULL", "/usr/include/…/bits/stl_vector.h", …)`).
+Those paths end up as string literals inside the `.rodata` section
+of the compiled binary. If our paths differ from upstream's — say
+we have `/usr/include/c++/12/vector` and upstream has
+`d:\rpi\cross\bookworm\gcc12.2.0\arm-linux-gnueabihf\sysroot\usr\include\c++\12\vector`
+— the binaries differ byte-for-byte just because of those paths.
+
+We discovered this mechanism in Phase 3.4. Each cell's matrix entry
+has a `prefix:` field with the exact Windows-style path upstream
+uses; the wrapper substitutes it in. The binary ends up with
+upstream's paths even though we're on Linux. Weird, but it's the
+cheapest way to match a known reproducibility quirk.
+
+**Why we still do it even though we've given up byte-match:**
+low cost, keeps the binary self-consistent with upstream for anyone
+doing `strings SBFspot | grep rpi` for forensic reasons, and leaves
+the door open to future byte-match work if upstream publishes their
+toolchain.
+
+### `-D_FORTIFY_SOURCE=2`
+
+**What it does:** tells glibc to replace certain standard-library
+functions (`memcpy`, `strcpy`, `sprintf`, `read`, …) with
+bounds-checking versions when the compiler can statically prove a
+buffer size. At runtime, if a check fails, the program calls
+`__chk_fail()` and aborts.
+
+**Why:** catches buffer overflows that would otherwise corrupt memory
+silently. This is the Debian hardening-wrapper default for every
+Debian-built binary since buster; we match it.
+
+**Behaviour change risk:** if SBFspot has a latent buffer overflow
+(it's mature C++, we don't expect any), hardened builds abort where
+upstream's would silently misbehave. That's strictly an improvement,
+but worth knowing.
+
+**Why `=2` and not `=3`:** `=3` (glibc 2.34+) adds more aggressive
+checks that rely on `__builtin_dynamic_object_size`, which only
+works well on gcc ≥ 12. Our buster cells use gcc 8.3, which doesn't
+support `=3`. `=2` works everywhere.
+
+### `-fstack-protector-strong`
+
+**What it does:** emits a "canary" — a random value written to the
+stack between local variables and the saved return address — in
+every function that has stack buffers, arrays, or uses `alloca()`.
+The canary is checked at function return; if corrupted, the program
+aborts with `*** stack smashing detected ***`.
+
+**Why:** classic defense against stack-based buffer overflows
+exploited to overwrite return addresses (the mechanism behind many
+classic CVEs). Debian default since stretch.
+
+**Alternatives considered:**
+- `-fstack-protector` (only functions with ≥8-byte char buffers) —
+  too narrow.
+- `-fstack-protector-all` — every function — unnecessarily slow;
+  nobody uses it in production.
+- `-fstack-protector-strong` is the Debian/Ubuntu default.
+
+### `-D_GLIBCXX_ASSERTIONS`
+
+**What it does:** turns on runtime debug-assertions inside libstdc++
+(the GNU C++ standard library). Things like `std::vector::operator[]`
+gain bounds checks; `std::list::front()` aborts on empty list;
+iterator comparisons sanity-check.
+
+**Why:** catches C++ standard-library misuse at runtime instead of
+letting it corrupt memory. Again, Debian default.
+
+**Cost:** some code paths get slightly slower. For SBFspot's
+workload (a few dozen solar readings per minute), imperceptible.
+
+### `-fPIE`
+
+**What it does:** emits *position-independent code* suitable for
+linking into an executable that will be loaded at a randomized
+address (ASLR). Paired with `-pie` at link time to actually produce
+a PIE executable.
+
+**Why we need the `-f` part and the `-` part:**
+- `-fPIE` (compile flag): tells gcc to generate relocation-table
+  references instead of absolute addresses for globals and functions,
+  so the code works at any load address.
+- `-pie` (link flag, in LDFLAGS): tells ld to produce an ELF of type
+  `ET_DYN` (shared object, executable) instead of `ET_EXEC` (fixed-
+  address executable). Without it, PIE codegen just adds overhead
+  without enabling ASLR.
+
+**Why PIE at all:** address-space layout randomisation. Each time
+the binary starts, it loads at a different base address. An attacker
+who finds a code-execution vulnerability then has to also leak the
+random offset to do anything useful. Debian default for all new
+binaries since buster.
+
+**Upstream doesn't do this on armhf.** Upstream's cross-toolchain
+predates Debian's PIE default for armhf, so upstream's armhf
+binaries are non-PIE (`ELF … executable`, not `pie executable`).
+Upstream's arm64 binaries are PIE.
+
+Going PIE everywhere is one of our deliberate divergences from
+upstream's output. It doesn't change functional behaviour — the
+binary still reads the same configs, talks the same protocols — but
+an auditor running `checksec` will see PIE on every cell instead
+of only arm64. See [§8](#8-things-we-tried-and-dropped) for the
+option where we considered matching upstream's non-PIE on armhf.
+
+### Flags we *don't* apply
+
+- **`-O3`:** Upstream's Makefile uses `-O2`. We leave that alone.
+  `-O3` trades code size + compile time for marginal runtime gains
+  that don't matter for SBFspot's polling workload.
+- **`-flto`:** Link-time optimisation. Gains negligible on a program
+  this size, and would complicate the link step.
+- **`-march=native`:** We're cross-building for generic armhf /
+  aarch64, not the build host. `-march=native` on the runner would
+  produce binaries that crash on older Pis.
+- **`-fsanitize=address`** / `-fsanitize=undefined`: debugging tools,
+  not production-shippable (they require runtime library support).
+
+### Flags we only apply via the upstream Makefile
+
+The Makefile adds `-c -Wall -O2 -Wno-unused-local-typedefs
+-Wno-psabi`. Those stay. `-Wno-psabi` silences a noisy warning about
+C++ ABI changes between gcc versions for armhf; it's cosmetic.
 
 ## 5. Why each link flag
 
