@@ -208,7 +208,7 @@ that don't need re-running.
 
 ## 3. Step-by-step walkthrough
 
-Every cell runs the same 13 steps. Here's what each one does, in
+Every cell runs the same 14 steps. Here's what each one does, in
 order, in plain language. Flag rationale is in sections 4–6; this
 section is just "what happens when."
 
@@ -282,8 +282,13 @@ exec /usr/bin/g++ \
   -fstack-protector-strong \
   -D_GLIBCXX_ASSERTIONS \
   -fPIE \
+  -g \
   "$@"
 ```
+
+The `-g` at the end makes gcc emit DWARF debug info; we split it
+into sidecars in step 11. Main binary stays small; auditors get
+symbolication data on demand.
 
 Why a wrapper instead of editing the Makefile? Because we have a
 hard rule in this fork: **no C++ source changes, no Makefile
@@ -332,7 +337,37 @@ For cells where `has_daemon: true`, the same dance is repeated for
 
 Rationale for the link flags in [§5](#5-why-each-link-flag).
 
-### Step 11: `Smoke test — binary runs and reports version`
+### Step 11: `Split debug info into .debug sidecars`
+
+The binary coming out of step 10 is unstripped: `-g` in the wrapper
+added DWARF debug info, and the LDFLAGS dropped `-s` (so the linker
+didn't strip). This step does the split:
+
+```sh
+objcopy --only-keep-debug   SBFspot SBFspot.debug   # extract DWARF
+objcopy --strip-unneeded    SBFspot                 # strip main
+objcopy --add-gnu-debuglink=SBFspot.debug SBFspot   # add wiring
+```
+
+After this:
+
+- `SBFspot` is stripped (~400–500 KB depending on cell), runnable,
+  and has a new small `.gnu_debuglink` ELF section pointing gdb /
+  `debuginfod` at the sidecar.
+- `SBFspot.debug` has only the DWARF content (~5–7 MB), not
+  runnable, usable for symbolication.
+
+The stripped binary is what goes into the main tarball. The
+sidecars go into a companion `.debug.tar.gz` (step 14). If a user
+ever core-dumps in production, an auditor can line up the two and
+get full source-line backtraces. See
+[§9](#9-reproducibility-guarantees) for the reproducibility
+measurement that shows both tarballs are deterministic.
+
+Same dance runs for `SBFspotUploadDaemon` on cells where
+`has_daemon: true`.
+
+### Step 12: `Smoke test — binary runs and reports version`
 
 Actually executes the freshly-built binary in the chroot:
 
@@ -348,9 +383,11 @@ startup), this step catches it before we waste time on the compare.
 
 Also runs `readelf -l | grep GNU_RELRO|GNU_STACK|PIE|INTERP` and
 `readelf -d | grep BIND_NOW|FLAGS_1` to confirm the hardening flags
-took effect.
+took effect. Smoke-testing the stripped binary (post step 11)
+confirms that the debug-split didn't accidentally break dynamic
+loading.
 
-### Step 12: `Download upstream asset` + `Normalised-ELF compare + report`
+### Step 13: `Download upstream asset` + `Normalised-ELF compare + report`
 
 Fetches the official tarball for this cell from
 `https://api.github.com/repos/SBFspot/SBFspot/releases/tags/V3.9.12`,
@@ -370,12 +407,13 @@ If they differ: `::warning title=<cell>::<bin> residual=<N> B`
 shows the byte-delta. Both warnings and notices are informational in
 Phase 5e — we're not failing the run on them anymore.
 
-### Step 13: `Assemble reproducible release tarball`
+### Step 14: `Assemble reproducible release tarball`
 
 Takes the fresh binary (+ daemon where applicable) + the
 non-binary data files from the tagged source tree, stages them in
 a temporary directory with sensible modes (0755 binaries / 0644
-data), and `tar`s the lot up deterministically.
+data), and `tar`s the lot up deterministically. The binary is the
+stripped one from step 11.
 
 Tar flags chosen for reproducibility:
 - `--sort=name` — member order is fixed (lexicographic).
@@ -407,7 +445,14 @@ Two files get renamed during staging: `SBFspot.cfg` →
 filename so `sbfspot-config`'s install flow doesn't overwrite a
 user's edited copy on upgrade.
 
-### Step 14: `Upload per-cell artefacts`
+**Second tarball: debug sidecars.** The same step also assembles
+`sbfspot-<db>-<arch>-linux-<codename>.debug.tar.gz`, containing
+just the `.debug` files produced by step 11
+(`SBFspot.debug` + optionally `SBFspotUploadDaemon.debug`). Same
+reproducible tar+gzip treatment. Consumers who want symbolication
+grab this alongside the main tarball; end users never need to.
+
+### Step 15: `Upload per-cell artefacts`
 
 Tars up `./out/` (which now has `out/ours/`, `out/upstream/`,
 `out/tarballs/`, `out/summary.txt`) as an artefact named
@@ -1074,32 +1119,72 @@ are therefore fully locked down against distro drift.
 never "master" or "HEAD." Two runs a year apart both get the same
 tag commit → same source tree byte-for-byte.
 
-### Measurement: run 1 vs. run 2
+### Measurement: run A vs. run B (Phase 5e.3)
 
-Phase 5e.2 commit produced run `24840329834`. Re-triggering the
-workflow produced run `24840705192`, 7 minutes later, no source
-changes. All 15 tarball SHA256s:
+Two workflow dispatches, no source changes between them:
+- Run A: `24842197467`
+- Run B: `24842590751`
+
+Each produces 15 main tarballs + 15 debug sidecar tarballs = 30
+artefacts per run. Canonical SHA256s:
+
+**Main tarballs (15):**
 
 ```
-98a92a292f30a0471b25ef38699587192b5979b863dc6edf0f8fb5e182940bd4  sbfspot-mariadb-arm-linux-bookworm.tar.gz
-5f49326c0ba4869d8b9a4839e60b12cabe4c5f2e242da801cf8e2ff841ae9862  sbfspot-mariadb-arm-linux-bullseye.tar.gz
-16c5d9f225ec1d2e5761141f1b2c956ffc94ff348c1d063ff200258d9c04d502  sbfspot-mariadb-arm-linux-buster.tar.gz
-eb1f923e0dede227d8abb8818ccb8c2c88ef164fb48496b4e5f59c2ff81fdf42  sbfspot-mariadb-arm64-linux-bookworm.tar.gz
-f2cd2ec7f62389d0ce2b247a33fb817a7bbeb22b1338a2fd6cab063faefb247d  sbfspot-mariadb-arm64-linux-bullseye.tar.gz
-f75f946a630d882391272d23d3e1cf6b1ea70c036ac03ac1a513a552a8ddcb22  sbfspot-nosql-arm-linux-bookworm.tar.gz
-4ae7b5219b8aca2ef4c101d35290ce44e66e442fa1a42e1275f7d44b4e755953  sbfspot-nosql-arm-linux-bullseye.tar.gz
-aa31e7b009b5c8b40c54c852c4236ad4a3318bb423c695e21420e4b298b38de9  sbfspot-nosql-arm-linux-buster.tar.gz
-6305e012a79ec6743b318e1be23e0fbf43a285826997df61c387e2d6bac18910  sbfspot-nosql-arm64-linux-bookworm.tar.gz
-5760a32cae1b86bce8b3dc6809dee9e820b8192c6722045e116e9b3ee5d0e920  sbfspot-nosql-arm64-linux-bullseye.tar.gz
-0bd3b5b28b3bc6ff4538ca87197721a8103112c5473bc4e998c4e1de47d3c62e  sbfspot-sqlite-arm-linux-bookworm.tar.gz
-1fb5dcf266ae4504b04372c3143fb7fb873b7a198d1d682b02b22dea8280082b  sbfspot-sqlite-arm-linux-bullseye.tar.gz
-bc9c6a52e892819be7d1026ddaa9b9aa598f43070f320589766733fe6f03e2ba  sbfspot-sqlite-arm-linux-buster.tar.gz
-7d553deb73eb92b65d07a3792d4053598bc5e31fa61b3fe45c39e9c9bd6d8b3f  sbfspot-sqlite-arm64-linux-bookworm.tar.gz
-00731f90173b8a8b0afaa971a6ef3d9686d8452aa27122b851f4032911cbfb02  sbfspot-sqlite-arm64-linux-bullseye.tar.gz
+fd82b1179bc38a41bf799ac4cc9e487ce05217185a1cb9847c4e5c8ff8227676  sbfspot-mariadb-arm-linux-bookworm.tar.gz
+12504c342b4e640b5588bed5d215b2c82e2028f985b3806e417a0fcebec05b5f  sbfspot-mariadb-arm-linux-bullseye.tar.gz
+9f09b1f92e9905489ed2dd8dbf3523cc565c606b07fa28bc7588e1a45c14ef09  sbfspot-mariadb-arm-linux-buster.tar.gz
+42362ffff188d93ad120b029c9f2ea3a3dfea055dfe32e2188a429187e2390ad  sbfspot-mariadb-arm64-linux-bookworm.tar.gz
+3a923f5a70e8d683aa38880660987a6a8bfb405206455b9276fe26777bfca1fd  sbfspot-mariadb-arm64-linux-bullseye.tar.gz
+6e0cdda5aaec81fb3bfa25e3fa9ea5f4951c550d252faba661c1ae05d9c6000c  sbfspot-nosql-arm-linux-bookworm.tar.gz
+789e45f5d3a1fd88fdb6c7dc9c164d268c1225e66c7886d3bd08daefc1bbad11  sbfspot-nosql-arm-linux-bullseye.tar.gz
+5525908c5b3b8f47847597291b02fad33cfff7a76629fbcffd0e3551f585058f  sbfspot-nosql-arm-linux-buster.tar.gz
+338486335d166e1a4224bf2c4af4ed404c7692bef94c5c906580bdea6358b384  sbfspot-nosql-arm64-linux-bookworm.tar.gz
+6e2ebc26e6525eaebf7f549b4b38320f4999dfc6efcd92501e6a793c26b51991  sbfspot-nosql-arm64-linux-bullseye.tar.gz
+07abe22168489a0b512cd4a82861ab035146fdd4267586a4546d74ad2feda67a  sbfspot-sqlite-arm-linux-bookworm.tar.gz
+7b90be7ab591dbff099b28183fe001550fe4ad31b6512eb6df24e3daaa315013  sbfspot-sqlite-arm-linux-bullseye.tar.gz
+b545b61bf5b7d0c0946cbdc2102202b28c0e164a08424936550d5815c60c61b9  sbfspot-sqlite-arm-linux-buster.tar.gz
+d6b2d4a628185d26fd2d2221084f54442534a9bd9411f387fdee8b589e2dc46d  sbfspot-sqlite-arm64-linux-bookworm.tar.gz
+9500cbe87a145e68c3eacdb18d397e90f6b88f49e929781442a4586b65eabaf4  sbfspot-sqlite-arm64-linux-bullseye.tar.gz
 ```
 
-**Diff between run 1 and run 2: empty.** All 15 tarballs
-byte-identical.
+**Debug sidecar tarballs (15):**
+
+```
+d21eb22c4682b16a7b6bbd24330230bfd4eb8cdf86e12f0f0a1668d7cee9ffc2  sbfspot-mariadb-arm-linux-bookworm.debug.tar.gz
+06e0cbb2eec335b1bfa8e87225dc595a2d38ff20c15436a0a1cad4c2d6f10cf7  sbfspot-mariadb-arm-linux-bullseye.debug.tar.gz
+e5cab3c01e174610498b40aba600684b4beebf122d276523e993514033963212  sbfspot-mariadb-arm-linux-buster.debug.tar.gz
+75edf6ccee5882d0d3ac016023d1dda92e4615f5027d02c305377260fadcc567  sbfspot-mariadb-arm64-linux-bookworm.debug.tar.gz
+04cb6d952969bbb5417a0172f089a986f63ff54f1aa18d8ad23abaf6c5d79d56  sbfspot-mariadb-arm64-linux-bullseye.debug.tar.gz
+b953b36b62de47fe3eaa2a79c304fa7d3017587f54255f13adaf38bb180b7355  sbfspot-nosql-arm-linux-bookworm.debug.tar.gz
+1cd6e440836a92ce6959108693d387139a28e8d1883ce893fda5b27bcf0d591f  sbfspot-nosql-arm-linux-bullseye.debug.tar.gz
+7b5d0e06325f0e914f375c63d3b55c2b15af203f8c20c747f20ee0a2b3521174  sbfspot-nosql-arm-linux-buster.debug.tar.gz
+21693fea81d607d2b21e9fc535b18c18a4be488420406debe0328a7fde5656bd  sbfspot-nosql-arm64-linux-bookworm.debug.tar.gz
+a33c0d9e116860d935ba8fcc8fa175ce7f9d7a25f0378ffcf63ecbdbfaa90e14  sbfspot-nosql-arm64-linux-bullseye.debug.tar.gz
+85c41be9f40150d86465754d4ad86d81b602e14f243e24373151b4c3e128754f  sbfspot-sqlite-arm-linux-bookworm.debug.tar.gz
+23f0ed1bd72f8e1d30a91fa5b24fecd26cc95c1a902c3406746b366f1205e61c  sbfspot-sqlite-arm-linux-bullseye.debug.tar.gz
+8442b32dde76dc1c4d95d709c902cbf54dffa31817bce4e588bea5a9723e7cdc  sbfspot-sqlite-arm-linux-buster.debug.tar.gz
+21eb5b278810c970fb0ec15554ddf846feff190e91d92c060db8807dc9cacf52  sbfspot-sqlite-arm64-linux-bookworm.debug.tar.gz
+3645360b006062f416d89176a3cc81eff206c733a93e6e08bb1e45a5837f4ab7  sbfspot-sqlite-arm64-linux-bullseye.debug.tar.gz
+```
+
+**Diff between run A and run B: empty.** All 30 tarballs
+byte-identical across runs.
+
+This includes buster (binutils 2.31, which pre-dates some
+`SOURCE_DATE_EPOCH` support in `ar` and `objcopy`). Reproducibility
+holds anyway because our compile inputs (source + flags + sysroot)
+are deterministic, so the DWARF content is deterministic, and
+`tar --mtime=@$SOURCE_DATE_EPOCH` overwrites any lingering per-file
+mtime noise at the tar layer.
+
+### Phase 5e.2 archive
+
+The Phase 5e.2 hashes (from runs `24840329834` and `24840705192`,
+before debug-info split was added) are still reproducible, but
+they're no longer the canonical set — step 11 now adds a
+`.gnu_debuglink` section to every binary, shifting its SHA. The
+current canonical hashes are the ones in the two blocks above.
 
 ### Known limitation: live Raspbian archive
 
