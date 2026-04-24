@@ -1145,11 +1145,14 @@ armhf binaries are non-PIE anyway (a default of their 2020-era
 cross-toolchain). Non-PIE binaries tolerate static-linking non-PIC
 code without emitting TEXTREL. No PIC rebuild needed.
 
-**Why rejected:** PIE is the biggest single hardening win in modern
-Linux — ASLR protection, required by Debian's hardening policy for
-all new binaries since buster. Dropping it to sidestep a build-time
-issue felt backwards. PIE has no user-visible behavioural effect;
-only a security-posture improvement.
+**Why rejected:** PIE is the biggest single hardening win in
+modern Linux — address-space layout randomisation. It's Debian's
+`dpkg-buildflags` default (`pie=yes`) for all architectures since
+buster; packages can opt out via
+`DEB_BUILD_MAINT_OPTIONS=hardening=-pie`, but that's the exception.
+Dropping PIE to sidestep a build-time issue felt backwards. PIE
+has no user-visible behavioural effect — only a security-posture
+improvement.
 
 ### Accept TEXTREL on armhf
 
@@ -1157,21 +1160,43 @@ only a security-posture improvement.
 armhf binaries end up with `FLAGS: TEXTREL BIND_NOW`.
 
 **Why rejected:** `checksec` and other hardening auditors flag
-`TEXTREL` as a serious regression. It breaks the read-only text
-segment, which is the core property RELRO aims to preserve.
+`TEXTREL` as a serious regression. The direct problem it causes
+is that the dynamic linker has to write into the `.text` segment
+at load time to patch addresses — either requiring the code
+segment to be mapped writable (historically RWX) or a transient
+`mprotect` RW→RX dance. That defeats the "code segment is never
+writable after load" invariant that modern ELF hardening tries
+to maintain. (It's a separate property from RELRO itself —
+RELRO targets the GOT and initialised-data segments, not `.text`
+— but both are part of the same "write-xor-execute" family of
+protections.)
 
 ### Rootfs caching (`actions/cache` or GHCR)
 
-**Idea:** each cell spends ~90 s on debootstrap. Caching the
-unpacked rootfs across runs could cut matrix time ~20 %.
+**Idea:** each cell spends ~60–90 s on debootstrap. Caching the
+unpacked rootfs across runs would cut each cell's wall-clock
+time noticeably, with the slowest-cell-gated matrix finishing
+faster overall.
 
-**Why not:** releases happen a few times a year, not daily. The
-speed gain is tiny in aggregate. And a cached rootfs introduces a
-subtle failure mode — it can drift stale against the live Raspbian
-archive and produce binaries that differ from what a fresh
-debootstrap would produce today, which is the opposite of what
-reproducible builds want. Deliberate cache-invalidation policy
-would be required. Not worth the complexity.
+**Why not:**
+- **Release cadence is low.** Upstream tags a new release a few
+  times a year, not daily. The aggregate CI-time saving is small.
+- **Cache hits can mask security-update staleness.** A cache
+  pinned for weeks or months keeps shipping the Raspbian package
+  versions that existed when the cache was populated, even if
+  Raspbian has since pushed security updates. End users install
+  off the published tarball on release day — a cached build hides
+  the fact that users are running against currently-available
+  system libraries rather than the ones that were fresh at cache
+  time. A deliberate invalidation policy would need to be
+  designed and operated.
+- **Complexity vs benefit.** Either `actions/cache` (per-branch,
+  auto-expiring) or a GHCR-hosted prebaked image (persistent but
+  needs a separate image-build workflow). Both add moving parts
+  for modest time saving on a low-frequency pipeline.
+
+Not done. Revisit if release cadence picks up or CI minutes
+become a constraint.
 
 ### `-flto`, `-march=native`, `-O3`
 
