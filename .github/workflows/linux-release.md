@@ -928,32 +928,54 @@ at any address.
 output type (`-pie`). An executable that can be loaded at a
 randomized address (ASLR). Requires all its code to be PIC.
 
-So: **every piece of code that goes into a PIE binary must be PIC.**
+So: **for a PIE binary to be clean (no text relocations), every
+piece of code linked in must be PIC.** Non-PIC code *can* go in,
+but the linker then has to patch absolute addresses at load time
+by writing into the `.text` segment — which defeats the read-only-
+code invariant that RELRO and PIE together try to enforce. That's
+the flag we want to avoid.
 
 ### What breaks
 
 Debian ships `libbluetooth.a` (static archive) in the
-`libbluetooth-dev` package. But Debian builds that `.a` **without
-`-fPIC`** on armhf — the object files inside use absolute 32-bit
-addresses for their globals.
+`libbluetooth-dev` package. On **armhf**, static-linking that stock
+`.a` into a PIE binary produces text relocations; on **arm64** it
+doesn't. An early iteration of this pipeline hit that asymmetry
+empirically: `readelf -d` on every armhf cell showed
+`FLAGS: TEXTREL BIND_NOW`, while arm64 cells showed clean
+`FLAGS: BIND_NOW`.
 
-When our linker tries to static-link that non-PIC `.a` into a PIE
-binary:
+What's happening underneath:
 
-- On **arm64**: the aarch64 instruction set uses PC-relative
-  addressing natively, so the linker can transparently convert
-  absolute references into PC-relative ones during link. No drama.
-- On **armhf**: the linker has no choice but to emit *text
-  relocations* — entries in the dynamic section that tell the
-  loader "at startup, patch this specific byte in the code segment
-  with the absolute address of symbol X." That sets the ELF
-  `DT_TEXTREL` flag and makes the code segment writable at load
-  time, which breaks RELRO and is universally flagged by security
-  auditors.
+- **Text relocations.** When the linker can't resolve a symbol
+  reference to a PC-relative or GOT-indirect form at link time, it
+  emits a relocation entry in the dynamic section. At load time the
+  loader applies it by *writing into the code segment* to patch the
+  address. That sets the ELF `DT_TEXTREL` flag and temporarily
+  makes `.text` writable, which defeats RELRO's guarantee. Modern
+  hardening checkers (`checksec`, OpenSSF compiler-hardening
+  guidance) flag it as a regression.
+- **Why armhf hits it with stock libbluetooth.a.** The object files
+  inside the stock armhf `.a` are compiled without `-fPIC`, so
+  they reference globals via `R_ARM_ABS32` relocations. When those
+  object files are linked into a PIE executable (which can be
+  loaded at any address), the linker has nowhere to resolve those
+  absolute references except by emitting TEXTREL. You can see the
+  non-PIC relocation types directly:
+  `readelf -r /usr/lib/arm-linux-gnueabihf/libbluetooth.a | head`.
+- **Why arm64 doesn't hit it.** The aarch64 codegen generally
+  produces PC-relative `adrp`+offset sequences for symbol access
+  even under non-PIC. That means whatever relocations are in the
+  stock aarch64 `.a` tend to resolve cleanly under PIE without
+  text patching. (Whether the stock arm64 `.a` is itself compiled
+  with `-fPIC` or just benefits from aarch64's PC-relative-by-
+  default codegen is a Debian-packaging detail we don't lean on.)
 
-An early iteration of this pipeline hit this bug: `readelf -d` on
-every armhf cell showed `FLAGS: TEXTREL BIND_NOW`. Arm64 cells
-showed clean `FLAGS: BIND_NOW`.
+For simplicity the PIC rebuild step runs on **every** cell
+(armhf and arm64 alike) — it's required on armhf and harmless on
+arm64. Keeping the step unconditional avoids one more per-arch
+branch in the YAML; the ~30-second cost on arm64 cells is cheaper
+than the maintenance overhead of a conditional.
 
 ### Why upstream's historical binaries didn't hit it
 
@@ -1052,10 +1074,11 @@ readelf -r /usr/lib/$TRIPLET/libbluetooth.a | grep -E \
   'R_ARM_GOT|R_AARCH64_.*GOT|R_ARM_GOTOFF' | head -3
 ```
 
-If the `.a` is PIC, relocations of those types (indirect-through-GOT)
-will be present. If non-PIC, they won't be. We check in step 8 so
-a regression surfaces immediately, not 3 steps later when the
-SBFspot link produces TEXTREL.
+If the `.a` is PIC, relocations of those types (indirect-through-
+GOT) will be present. If non-PIC, they won't be. This check is at
+the end of step 9 itself, so a regression in the rebuild surfaces
+immediately rather than two steps later when the SBFspot link
+would emit TEXTREL.
 
 ### Cost
 
