@@ -667,12 +667,12 @@ letting it corrupt memory.
 section, `_GLIBCXX_ASSERTIONS` is **not** in Debian's default
 `dpkg-buildflags` set (verifiable with
 `DEB_VENDOR=Debian dpkg-buildflags --get CPPFLAGS` — it's absent).
-It *is* the default in Fedora and RHEL's GCC packaging and is
-recommended by the [OpenSSF compiler-hardening
+It *is* enabled system-wide in Fedora/RHEL via
+`redhat-rpm-config`'s `%{optflags}` (introduced in Fedora 28)
+and is recommended by the [OpenSSF compiler-hardening
 guide](https://github.com/ossf/wg-best-practices-os-developers/blob/main/docs/Compiler-Hardening-Guides/Compiler-Options-Hardening-Guide-for-C-and-C%2B%2B.md)
-(source repo on GitHub; also rendered at
-`best.openssf.org/Compiler-Hardening-Guides/`). We opt into it
-here as additional defense in depth.
+as an always-on hardening option. We opt into it here as
+additional defense in depth.
 
 **Cost:** some code paths get slightly slower. For SBFspot's
 workload (a few dozen solar readings per minute), imperceptible.
