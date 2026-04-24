@@ -1365,10 +1365,13 @@ addresses to jump to.
 **BIND_NOW** — ELF dynamic flag requesting "resolve all symbols
 at startup, not lazily." Prerequisite for full RELRO.
 
-**bluez** — Linux Bluetooth stack. Ships `libbluetooth.so.3` +
-`libbluetooth.a` via the `libbluetooth-dev` package; also the
-`bluetoothd` daemon. SBFspot uses libbluetooth for talking to
-older Bluetooth-enabled SMA inverters.
+**bluez** — Linux Bluetooth stack. Built from the `bluez` Debian
+source package, which produces (among others) two binary
+packages relevant here: `libbluetooth3` ships `libbluetooth.so.3`
+(the runtime shared library); `libbluetooth-dev` ships
+`libbluetooth.a` + `libbluetooth.so` symlink + headers for
+building against. SBFspot uses libbluetooth for talking to older
+Bluetooth-enabled SMA inverters.
 
 **bluez source package** — the Debian source package named `bluez`
 that produces `libbluetooth3`, `libbluetooth-dev`, `bluez`, and
@@ -1433,7 +1436,12 @@ inside PIE executables.
 time, patch this address using information about symbol X." The
 linker decides at link time which relocations to emit; the loader
 processes them at startup. Text relocations (inside the `.text`
-section) are the problematic kind that RELRO can't handle.
+code segment) are the problematic kind: applying them requires the
+loader to make `.text` temporarily writable, which defeats the
+"code segment is never writable" invariant. RELRO targets a
+different set of segments (the GOT and init-array data) and
+doesn't interact with text relocations directly — both are part
+of the same hardening family but they're distinct mechanisms.
 
 **RELRO** — "RELocation Read-Only." Linker flag `-z,relro`:
 segments containing relocations get marked read-only after load-time
@@ -1466,19 +1474,26 @@ architecture. In this pipeline each chroot *is* the sysroot; no
 separate cross-compiler toolchain is needed because we build
 natively in the chroot.
 
-**TEXTREL** — DT_TEXTREL dynamic flag. Indicates the binary has
-relocations inside its `.text` (code) segment. Bad for security
-(requires writable code segment at load time) and incompatible
-with full RELRO. Emitted by the linker when static-linking non-PIC
-code into a PIE executable on armhf.
+**TEXTREL** — `DT_TEXTREL` dynamic flag. Indicates the binary has
+relocations inside its `.text` (code) segment. Bad for security:
+the loader has to make `.text` writable during relocation
+processing, breaking the "code stays read-only after load"
+invariant modern ELF hardening relies on. Commonly emitted when
+static-linking non-PIC code into a PIE executable. In this
+pipeline it was observed on armhf before the PIC-libbluetooth
+rebuild; arm64 didn't hit it because aarch64 codegen avoids the
+address patterns that trigger it (see §6).
 
 **triplet** — a GNU-style identifier for a CPU + OS + ABI
 combination, e.g. `arm-linux-gnueabihf`, `aarch64-linux-gnu`,
 `x86_64-w64-mingw32`. Used in library paths like
 `/usr/lib/arm-linux-gnueabihf/`.
 
-**Ubuntu-24.04-arm** — GitHub Actions runner image label. Points
-to a 4-core Ampere Altra (aarch64) VM running Ubuntu 24.04.
+**Ubuntu-24.04-arm** — GitHub Actions runner image label. Provides
+an aarch64 VM running Ubuntu 24.04. GitHub's public runner specs
+describe these as Azure-hosted ARM64 hardware; the exact CPU
+model isn't guaranteed to stay constant over time and isn't
+something this pipeline depends on.
 
 ---
 
