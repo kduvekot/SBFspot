@@ -219,7 +219,7 @@ the end of the workflow:
 ```yaml
 - name: Attach tarballs + SBOMs to GitHub Release (tag push only)
   if: startsWith(github.ref, 'refs/tags/V3.9.')
-  uses: softprops/action-gh-release@v2
+  uses: softprops/action-gh-release@v3
   with:
     files: |
       out/tarballs/*.tar.gz
@@ -566,7 +566,7 @@ artefact named `sbfspot-<cell-id>`.
 Conditional on `github.ref` starting with `refs/tags/V3.9.` —
 i.e. this step only runs when the workflow was triggered by a tag
 push matching the release-tag pattern. Uses
-`softprops/action-gh-release@v2` to attach
+`softprops/action-gh-release@v3` to attach
 `out/tarballs/*.tar.gz` (main tarballs + debug sidecars) plus
 `out/tarballs/*.packages.list` (SBOMs from step 14) as assets on
 the matching GitHub Release. 45 files total: 15 main + 15 debug +
@@ -668,11 +668,11 @@ section, `_GLIBCXX_ASSERTIONS` is **not** in Debian's default
 `dpkg-buildflags` set (verifiable with
 `DEB_VENDOR=Debian dpkg-buildflags --get CPPFLAGS` — it's absent).
 It *is* the default in Fedora and RHEL's GCC packaging and is
-recommended by Red Hat's
-[Developer Program](https://developers.redhat.com/blog/2020/02/11/toward-_fortify_source-parity-between-clang-and-gcc)
-and by the [OpenSSF compiler hardening
-guide](https://best.openssf.org/Compiler-Hardening-Guides/). We
-opt into it here as additional defense in depth.
+recommended by the [OpenSSF compiler-hardening
+guide](https://github.com/ossf/wg-best-practices-os-developers/blob/main/docs/Compiler-Hardening-Guides/Compiler-Options-Hardening-Guide-for-C-and-C%2B%2B.md)
+(source repo on GitHub; also rendered at
+`best.openssf.org/Compiler-Hardening-Guides/`). We opt into it
+here as additional defense in depth.
 
 **Cost:** some code paths get slightly slower. For SBFspot's
 workload (a few dozen solar readings per minute), imperceptible.
