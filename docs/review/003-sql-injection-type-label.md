@@ -25,6 +25,16 @@ This is particularly notable because the rest of the same classes (day data,
 month data, spot data, events, battery) correctly uses parameterized prepared
 statements — only these two methods regressed to concatenation.
 
+**Per-field taint note.** Of the three fields fed to `s_quoted()` in
+`type_label()`, only `DeviceName` is a direct copy of inverter-supplied
+bytes (`SBFspot/SBFspot.cpp:2595`). `DeviceType` comes from
+`tagdefs.getDesc(attr.front())` at `SBFspot.cpp:2609`, and `SWVersion` is
+BCD-formatted from 4 bytes by `version_tostring()` at `SBFspot.cpp:2274`.
+Neither of those paths lets an unmodified-tagfile attacker plant a `'` byte
+on a stock build. The SQL injection therefore hinges on `DeviceName`; the
+other two columns still want a parameterized binding for consistency and
+for the case where an attacker can also plant a malicious tagfile.
+
 ## Affected code
 
 ### The unsafe quoting helper
@@ -43,7 +53,9 @@ leaves everything after it as SQL.
 
 `SBFspot/db_MySQL.cpp:126-160` — `type_label` (SQLite mirror at
 `SBFspot/db_SQLite.cpp:140-174` uses `INSERT OR IGNORE` instead of
-`INSERT IGNORE`, but is otherwise structurally identical):
+`INSERT IGNORE`, but is otherwise structurally identical). The `s_quoted`
+call sites to reference directly: `db_MySQL.cpp:139-141`, `:150-152` and
+`db_SQLite.cpp:153-155`, `:164-166`:
 
 ```cpp
 sql << "INSERT IGNORE INTO Inverters VALUES(" <<
@@ -67,15 +79,18 @@ sql << "UPDATE Inverters SET" <<
 
 ### Where the tainted strings come from (shared with finding #2)
 
-`SBFspot/SBFspot.cpp:2595`:
+`SBFspot/SBFspot.cpp:2595` for `DeviceName`:
 
 ```cpp
 device->DeviceName = std::string((char *)recptr + 8,
                                  strnlen((char *)recptr + 8, recordsize - 8));
 ```
 
-`DeviceType` and `SWVersion` are similarly inverter-controlled. Whatever
-bytes the peer sends become the field value. No character validation.
+Whatever bytes the peer sends become the field value; no character
+validation. `DeviceType` and `SWVersion` come from the indirect paths
+described in the Summary (`SBFspot.cpp:2609` and `:2600`/`:2274`
+respectively) — still worth parameterizing, but not the primary attack
+surface on a stock build.
 
 ### Execution path
 
@@ -295,10 +310,11 @@ std::string s_quoted(const std::string& str) const
 }
 ```
 
-Note `mysql_real_escape_string` requires a live connection handle —
-`s_quoted` needs to become a non-static method on the base (or take
-`m_dbHandle` as an argument). `sqlite3_mprintf("%Q", ...)` handles both
-escaping and quoting.
+`s_quoted` is already a protected non-static member of `db_SQL_Base` (see
+`db_MySQL.h:92-94` / `db_SQLite.h:86-88`), so `m_dbHandle` is in scope.
+`mysql_real_escape_string` requires a live connection handle — ensure
+`s_quoted` is not called before `open()` succeeds. `sqlite3_mprintf("%Q", ...)`
+handles both escaping and quoting and does not require a handle.
 
 **Defense in depth.** Restrict `DeviceName` (and all other inverter-sourced
 strings) to a safe character set at ingest — see finding #2's sample patch
@@ -308,12 +324,11 @@ missed today or added tomorrow, and shares its root cause with finding #2.
 ## Cross-reference
 
 Findings #2 (MQTT command injection) and #3 (this) both stem from treating
-inverter-sourced strings as trusted. A single sanitization pass at the
-ingest point (`SBFspot/SBFspot.cpp:2595`, and similar sites for `DeviceType`
-and `SWVersion` which originate a few records away) is the most economical
-one-line defense while the per-site fixes are rolled out. Finding #1
-independently demonstrates that the same transport layer cannot be trusted
-for *length* either.
+inverter-sourced strings as trusted, and the primary tainted field in both
+cases is `DeviceName`. A single sanitization pass at the ingest point
+(`SBFspot/SBFspot.cpp:2595`) is the most economical one-line defense while
+the per-site fixes are rolled out. Finding #1 independently demonstrates
+that the same transport layer cannot be trusted for *length* either.
 
 ## Disclosure guidance
 

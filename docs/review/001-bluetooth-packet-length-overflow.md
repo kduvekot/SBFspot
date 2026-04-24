@@ -80,14 +80,14 @@ are all reachable.
 
 ### The read helper — no additional bounds check
 
-`SBFspot/Bluetooth.cpp:428-469` — `bthRead`:
+`SBFspot/Bluetooth.cpp:428` defines `bthRead`; the actual `recv()` call is at line 444:
 
 ```cpp
-int bthRead(uint8_t *buf, unsigned int bufsize)
+int bthRead(uint8_t *buf, unsigned int bufsize)   // line 428
 {
     ...
     if (FD_ISSET(sock, &readfds))
-        bytes_read = recv(sock, (char *)buf, bufsize, 0);   // bufsize == attacker-controlled
+        bytes_read = recv(sock, (char *)buf, bufsize, 0);   // line 444 — bufsize == attacker-controlled
     ...
 }
 ```
@@ -106,14 +106,14 @@ unconstrained.
 ## Scope
 
 - **Bluetooth path: VULNERABLE.** Transport is RFCOMM (`SOCK_STREAM` over BT), so `recv()` returns as much data as the peer supplies up to the requested size.
-- **Ethernet / Speedwire path: NOT directly affected, but warrants audit.** `ethGetPacket()` (`SBFspot/SBFspot.cpp:244-298`) reads via `ethRead(CommBuf, sizeof(CommBuf))` (`SBFspot/Ethernet.cpp:113`), which is bounded by the buffer size and naturally capped by UDP datagram semantics — no second `recv()` driven by the header length. However, the subsequent `memcpy(pcktBuf+1, CommBuf + sizeof(ethPacketHeaderL1), bib - sizeof(ethPacketHeaderL1))` uses `bib - sizeof(ethPacketHeaderL1)` without checking against `maxpcktBufsize`. If `pcktBuf < CommBuf` this is an overflow; if equal, it is safe-but-fragile. Add a bounds check regardless.
+- **Ethernet / Speedwire path: NOT directly affected, but warrants audit.** `ethGetPacket()` (`SBFspot/SBFspot.cpp:244-298`) reads via `ethRead(CommBuf, sizeof(CommBuf))` at `SBFspot/SBFspot.cpp:252` — bounded by the buffer size and naturally capped by UDP datagram semantics — no second `recv()` driven by the header length. (`ethRead` itself is defined at `SBFspot/Ethernet.cpp:90`, with the `recvfrom` call at line 113.) However, the subsequent `memcpy(pcktBuf+1, CommBuf + sizeof(ethPacketHeaderL1), bib - sizeof(ethPacketHeaderL1))` at `SBFspot.cpp:273` uses `bib - sizeof(ethPacketHeaderL1)` without checking against `maxpcktBufsize`. Because `pcktBuf == CommBuf` in size (both `COMMBUFSIZE`), this is safe-but-fragile today. Add a bounds check regardless.
 
 ## Preconditions
 
 - SBFspot built with `BT_SBFSPOT` (Bluetooth) support enabled.
 - Operator runs SBFspot connected to an inverter over Bluetooth.
 - Attacker can either (a) bring a Bluetooth radio within range and impersonate the paired inverter, (b) compromise the inverter firmware, or (c) MITM the RFCOMM stream.
-- Reachable **pre-authentication** — `getPacket()` runs during the initial handshake, before the inverter password challenge completes. The `isValidSender` check only compares the source address; it does *not* validate the length, and address spoofing on Bluetooth is feasible.
+- Reachable **pre-authentication**, and specifically *before* sender validation: the second `bthRead` at line 114 executes before `isValidSender()` is consulted at line 117 (definition at `SBFspot.cpp:2217-2224`). The corruption happens regardless of whether the sender address matches. `getPacket()` also runs during the initial handshake, before the inverter password challenge completes.
 
 ## Exploit scenario
 

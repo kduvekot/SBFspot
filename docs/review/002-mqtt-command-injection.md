@@ -15,36 +15,61 @@
 ## Summary
 
 `MqttExport::exportInverterData` in `SBFspot/mqtt.cpp` builds a single shell
-command string by interpolating inverter-supplied fields (`DeviceName`,
-`DeviceClass`, `DeviceType`, `SWVersion`) into a `mosquitto_pub` template,
-then executes the result with `::system()`. The only sanitization is a
-wholesale `boost::replace_all(mqtt_command_line, "\"", "'")` applied **before**
+command string by interpolating inverter-supplied fields into a
+`mosquitto_pub` template, then executes the result with `::system()`. The
+only sanitization is a wholesale
+`boost::replace_all(mqtt_command_line, "\"", "'")` applied **before**
 placeholder substitution, which switches the outer quoting style but does
 nothing to escape shell metacharacters appearing **inside** an inverter
 string. A single `'` byte in `DeviceName` is enough to break out on Linux;
 on Windows a `"` byte breaks out into `cmd.exe`.
 
+The primary tainted field is `DeviceName` (`SBFspot/SBFspot.cpp:2595` copies
+it verbatim from the NameplateLocation record). Three other fields from the
+same MQTT switch — `DeviceClass`, `DeviceType`, `SWVersion` — are also
+snprintf'd with the same `"%s"` template, but on inspection they are
+*indirectly* tainted: `DeviceType`/`DeviceClass` come through
+`tagdefs.getDesc()` lookup (`SBFspot.cpp:2609`, `:2627`), and `SWVersion`
+is BCD-formatted from 4 bytes via `version_tostring()` (`SBFspot.cpp:2274`).
+An attacker cannot plant arbitrary shell metacharacters in those fields on
+a stock build. They become tainted only if the attacker can also corrupt
+`tagdefs` (loaded from an on-disk lookup file), at which point the priority
+still ranks below `DeviceName`. The fix should cover all four anyway, since
+a future edit that widens the lookup tables would silently re-enable the
+sink.
+
 ## Affected code
 
 ### The `system()` call and command-line assembly
 
-`SBFspot/mqtt.cpp:60-289` — `MqttExport::exportInverterData`. The vulnerable sequence:
+`SBFspot/mqtt.cpp:50-295` — `MqttExport::exportInverterData`. Key lines:
+
+- Line 60: `char value[80];` — per-field scratch buffer. snprintf into this buffer constrains any individual injected payload to ≤ 77 bytes (80 − 2 surrounding quotes − trailing NUL).
+- Line 67 (Windows) / 69 (Linux): command-line assembly.
+- Line 71: `boost::replace_all(mqtt_command_line, "\"", "'");` — the "sanitizer".
+- Line 118: `snprintf(value, sizeof(value) - 1, "\"%s\"", inv.DeviceName.c_str());` — tainted field interpolation.
+- Line 281: `boost::replace_first(mqtt_command_line, "{message}", mqtt_message.str().substr(1));` — message spliced into command line.
+- Line 285: `int system_rc = ::system(mqtt_command_line.c_str());` — the sink.
+
+Extracted:
 
 ```cpp
+char value[80];                                                             // line 60
+
 #if defined(_WIN32)
-std::string mqtt_command_line = "\"\"" + m_config.mqtt_publish_exe + "\" "
+std::string mqtt_command_line = "\"\"" + m_config.mqtt_publish_exe + "\" "  // line 67
                               + m_config.mqtt_publish_args + "\"";
 #else
-std::string mqtt_command_line = m_config.mqtt_publish_exe + " "
+std::string mqtt_command_line = m_config.mqtt_publish_exe + " "             // line 69
                               + m_config.mqtt_publish_args;
 // On Linux, message must be inside single quotes
-boost::replace_all(mqtt_command_line, "\"", "'");        // line 71 — only "transform"
+boost::replace_all(mqtt_command_line, "\"", "'");                           // line 71
 #endif
 
 // Fill host/port/topic
-boost::replace_first(mqtt_command_line, "{host}",  m_config.mqtt_host);
-boost::replace_first(mqtt_command_line, "{port}",  m_config.mqtt_port);
-boost::replace_first(mqtt_command_line, "{topic}", m_config.mqtt_topic);
+boost::replace_first(mqtt_command_line, "{host}",  m_config.mqtt_host);     // line 75
+boost::replace_first(mqtt_command_line, "{port}",  m_config.mqtt_port);     // line 76
+boost::replace_first(mqtt_command_line, "{topic}", m_config.mqtt_topic);    // line 77
 ...
 // Inverter-controlled strings get snprintf'd in:
 case "invname"_:   snprintf(value, sizeof(value)-1, "\"%s\"", inv.DeviceName.c_str());  // line 118
@@ -62,6 +87,10 @@ inserted by `snprintf` *later*, at line 118, and then spliced into the
 command line via `{message}` at line 281 — so they are NOT rewritten and
 arrive in the final command as literal `"..."` inside a shell single-quoted
 context.
+
+The 80-byte `value` buffer (line 60) imposes a ceiling of ~77 bytes on any
+single injected payload, but that is enough room for a useful payload such
+as `';sh -i>/tmp/s;echo '` (22 bytes).
 
 The default shipped `mqtt_publish_args` is something like:
 
@@ -86,14 +115,26 @@ device->DeviceName = std::string((char *)recptr + 8,
 
 `recptr` points into the raw network packet bytes received from the inverter.
 No character filtering, no length cap beyond the `strnlen` terminator scan,
-no escaping — whatever bytes the peer sends become `DeviceName`. Same
-pattern for `DeviceClass`, `DeviceType`, and `SWVersion`.
+no escaping — whatever bytes the peer sends become `DeviceName`.
+
+For completeness, the other three fields read in the same switch come from
+different code paths in the same function:
+
+- `SWVersion` — `SBFspot.cpp:2600`: `device->SWVersion = version_tostring(get_long(recptr + 24));` where `version_tostring` (at `SBFspot.cpp:2274-2288`) BCD-formats 4 attacker bytes into a `%c%c.%c%c.%02d.%c` string whose character set is confined to digits, `.`, and one of `NEABRS?`. Not directly attacker-controlled text.
+- `DeviceType` — `SBFspot.cpp:2609`: `device->DeviceType = tagdefs.getDesc(attr.front());` — looks up a description from the on-disk tag file. Attacker controls only the key.
+- `DeviceClass` — `SBFspot.cpp:2627`: `device->DeviceClass = tagdefs.getDesc(device->DevClass, "UNKNOWN CLASS");` — same lookup mechanism.
 
 ## Scope
 
-- One sink (`mqtt.cpp:285`), four tainted fields (`DeviceName`, `DeviceClass`, `DeviceType`, `SWVersion`).
+- One sink (`mqtt.cpp:285`). Primary tainted field: `DeviceName`. Secondary (via lookup-table / format-string indirection): `DeviceClass`, `DeviceType`, `SWVersion`. See Summary for per-field taint analysis.
 - Affects both Linux and Windows. On Linux the outer quoting becomes single quotes and a `'` byte breaks out to `/bin/sh`. On Windows the outer remains `"` and a `"` byte breaks out into `cmd.exe`.
 - Does **not** require a malicious mosquitto broker — the broker plays no role; injection happens before the broker is contacted.
+- Payload size per field is bounded to ~77 bytes by the `char value[80]` buffer at `mqtt.cpp:60`.
+
+The `invstatus` and `invgridrelay` cases (lines 133 and 139) snprintf
+`tagdefs.getDesc(...)` output, which is the same indirect-taint situation as
+`DeviceType`/`DeviceClass` — worth fixing for consistency but not the primary
+exposure.
 
 ## Preconditions
 

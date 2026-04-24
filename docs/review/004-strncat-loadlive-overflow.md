@@ -19,11 +19,16 @@
 `strncat(cfg->outputPath, "/LoadLive", sizeof(cfg->outputPath))`. The third
 argument to `strncat` is the maximum number of bytes to copy from the
 **source**, not the size of the destination buffer. Because `cfg->outputPath`
-is a fixed-size `char[MAX_PATH]` (260 bytes) populated from the `OutputPath`
-config value via `strncpy(..., sizeof(cfg->outputPath) - 1)`, it can already
-hold 259 bytes plus NUL — and `strncat` then unconditionally appends the
-9-byte literal `"/LoadLive"` plus a NUL, writing up to 10 bytes past the end
-into the adjacent struct member.
+is a fixed-size `char[MAX_PATH]` populated from the `OutputPath` config
+value via `strncpy(..., sizeof(cfg->outputPath) - 1)`, it can already hold
+`MAX_PATH − 1` bytes plus NUL — and `strncat` then unconditionally appends
+the 9-byte literal `"/LoadLive"` plus a NUL, writing up to 10 bytes past
+the end into the adjacent struct member.
+
+`MAX_PATH` is platform-dependent: **256** on Linux (`SBFspot/oslinux.h:60-62`)
+and **260** on Windows (from the platform SDK). The overflow therefore
+triggers at an `OutputPath` length of 247 chars or more on Linux, and 251 or
+more on Windows.
 
 ## Affected code
 
@@ -40,25 +45,28 @@ if (cfg->loadlive)
 }
 ```
 
-Source population (same file, around line 1714):
+Source population (same file, line 1714):
 
 ```cpp
 strncpy(cfg->outputPath, value, sizeof(cfg->outputPath) - 1);
 ```
 
-So `cfg->outputPath` holds up to 259 attacker-influenced bytes plus a
-terminator. The misuse of `strncat` then writes past it.
+So `cfg->outputPath` holds up to `MAX_PATH − 1` attacker-influenced bytes
+plus a terminator. The misuse of `strncat` then writes past it.
 
-Adjacent struct member (`SBFspot/Types.h:80-81`):
+Adjacent struct members (`SBFspot/Types.h:80-81`):
 
 ```cpp
-char outputPath[MAX_PATH];
-char outputPath_Events[MAX_PATH];
+char outputPath[MAX_PATH];         // line 80
+char outputPath_Events[MAX_PATH];  // line 81
 ```
 
-`outputPath_Events` follows immediately. The overflow corrupts up to ~10
-leading bytes of `outputPath_Events`, which is the path used for event-CSV
-writes.
+`outputPath_Events` is declared immediately after `outputPath` in the same
+struct. C guarantees struct members appear in declaration order, and
+`char[]` members require no alignment padding, so the two buffers are
+contiguous in memory on every mainstream compiler. The overflow corrupts
+up to ~10 leading bytes of `outputPath_Events`, which is the path used for
+event-CSV writes (see `SBFspot.cpp:2084` for the nearby use).
 
 ## Scope
 
@@ -73,7 +81,7 @@ SBFspot/SBFspot.cpp:2090:    strncat(cfg->outputPath, "/LoadLive", sizeof(cfg->o
 ## Preconditions
 
 1. SBFspot is invoked with the `-loadlive` command-line flag (PVoutput live-upload mode).
-2. The `OutputPath` value in `SBFspot.cfg` is at least 251 characters long (so that the 9-byte append overflows the 260-byte buffer).
+2. The `OutputPath` value in `SBFspot.cfg` is long enough to exhaust the buffer: ≥ 247 chars on Linux (`MAX_PATH = 256`), ≥ 251 chars on Windows (`MAX_PATH = 260`).
 3. Either the operator is the attacker (low impact — they can already do worse) **or** the config file is writable by a less-privileged actor than the SBFspot process (e.g., shared NFS, misconfigured Docker bind mount, multi-user host where the SBFspot service runs under a more-privileged account).
 
 The privilege-boundary case (precondition #3 second clause) is what justifies
@@ -85,13 +93,13 @@ Threat model: a low-privileged user can write `SBFspot.cfg` (e.g., via a
 shared bind-mounted volume in a container deployment), but the SBFspot binary
 runs under a more-privileged account.
 
-1. Attacker writes:
+1. Attacker writes into `SBFspot.cfg`:
    ```
-   OutputPath=/var/log/sbfspot/<253 chars of A>
+   OutputPath=/var/log/sbfspot/<245 A's>      # Linux  (total length = 255 chars = MAX_PATH-1)
+   OutputPath=/var/log/sbfspot/<249 A's>      # Windows (total length = 259 chars = MAX_PATH-1)
    ```
-   into `SBFspot.cfg`.
 2. The system operator (or systemd timer) starts SBFspot with `-loadlive`.
-3. `strncpy` copies 259 bytes of the attacker's path into `cfg->outputPath`.
+3. `strncpy` at line 1714 copies `MAX_PATH − 1` bytes of the attacker's path into `cfg->outputPath`.
 4. `strncat` at line 2090 appends `"/LoadLive"` plus NUL, writing 10 bytes into `cfg->outputPath_Events`.
 5. The attacker now controls the first ~10 bytes of `outputPath_Events`. Combined with knowledge of the format (a path), the attacker can redirect event CSV writes to a directory they read from, exfiltrating event data — **or** combine with a symlink to escalate writes.
 

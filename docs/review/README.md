@@ -33,12 +33,16 @@ from the other).
 | [3](003-sql-injection-type-label.md) | `SBFspot/db_MySQL.cpp:137-153` (+ SQLite mirror) | HIGH | 8.1 | SQL injection (CWE-89) — `type_label()` |
 | [4](004-strncat-loadlive-overflow.md) | `SBFspot/SBFspot.cpp:2090` | MEDIUM-HIGH | 3.4 – 7.8 | Out-of-bounds write (CWE-787) — `strncat` size-arg misuse |
 
-Findings #1–#3 share a common root cause: inverter-supplied bytes (the
-`pkLength` header field and the `DeviceName`/`DeviceType`/`SWVersion`
-strings read at `SBFspot/SBFspot.cpp:2595`) are treated as trusted throughout
-the pipeline. A single sanitization pass at the ingest point would not be a
-substitute for the per-sink fixes, but it would meaningfully reduce the blast
-radius of any future sink that is added and forgotten.
+Findings #1–#3 share a common root cause: inverter-supplied bytes are
+treated as trusted throughout the pipeline. Concretely, the `pkLength`
+header field drives finding #1, and the `DeviceName` string read verbatim
+from the network at `SBFspot/SBFspot.cpp:2595` drives findings #2 and #3.
+(The related fields `DeviceClass`, `DeviceType`, and `SWVersion` travel
+through lookup tables or format strings and are not directly
+attacker-controlled on a stock build — see the per-field taint notes in
+findings #2 and #3.) A single sanitization pass at the ingest point would
+not be a substitute for the per-sink fixes, but it would meaningfully
+reduce the blast radius of any future sink that is added and forgotten.
 
 ## Disclosure guidance
 
