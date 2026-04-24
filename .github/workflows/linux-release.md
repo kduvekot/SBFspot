@@ -1228,18 +1228,20 @@ limitation section.
 
 ### What this pipeline does to achieve it
 
-**Fixed `SOURCE_DATE_EPOCH`.** Step 5 reads the triggering commit's
-Unix timestamp and exports it to `$GITHUB_ENV`. Every downstream
-build tool respects it:
+**Fixed `SOURCE_DATE_EPOCH`.** Step 3 reads the triggering
+commit's Unix timestamp and exports it to `$GITHUB_ENV`. The
+pipeline uses it (and, where a tool doesn't auto-respect `SDE`,
+an equivalent explicit mechanism) across every step that would
+otherwise embed a build-time value:
 
-| Tool | Effect |
+| Tool | Mechanism |
 |---|---|
-| `gcc` | `__DATE__` / `__TIME__` macros use SDE (no impact on current SBFspot source, safe for future use). |
-| `ld` | `--build-id=sha1` computes a SHA1 over content, not time, so the build-id is deterministic given deterministic input. |
-| `ar` | Archive member timestamps → 0 (binutils ≥ 2.35). |
-| `objcopy` | Section mtime fields → 0. |
-| `tar` | `--mtime=@${SDE}` writes SDE into every member header. |
-| `gzip` | `gzip -n` suppresses its own mtime + filename fields. |
+| `gcc` | Auto-reads `SOURCE_DATE_EPOCH` for the `__DATE__` / `__TIME__` macros (no impact on current SBFspot source; safe for future use). |
+| `ld` | `--build-id=sha1` is content-hashed, not time-based. Naturally deterministic given deterministic input — `SOURCE_DATE_EPOCH` doesn't affect it. |
+| `ar` | Auto-reads `SOURCE_DATE_EPOCH` (binutils ≥ 2.35) — zeros archive member timestamps. |
+| `objcopy` | Auto-reads `SOURCE_DATE_EPOCH` (binutils ≥ 2.35) — zeros section mtime fields. |
+| `tar` | We pass `--mtime=@${SOURCE_DATE_EPOCH}` explicitly — writes that timestamp into every member header. |
+| `gzip` | Separate mechanism: we pass `gzip -n` to suppress the header's filename + mtime fields. (The resulting gzip header is verifiable: `1f 8b 08 00 00000000 00 03` — MTIME=0, XFL=0, OS=0x03.) |
 
 **Deterministic tar format.** `--sort=name` + `--owner=0 --group=0
 --numeric-owner` + `--format=ustar`. Member order and per-member
@@ -1301,10 +1303,13 @@ extra machinery for a release cadence of a few tags per year.
 ### What this pipeline intentionally does not reproduce
 
 - **The historical hand-built tarballs' gzip-header bytes.** Those
-  were written by Windows 7-Zip, with `os=00` (FAT), `xfl=04`
-  (`--fast`), and a populated wall-clock `mtime`. This pipeline
-  writes `os=03` (Unix), `xfl=00`, `mtime=0`. Reproducing the old
-  format would need a custom gzip writer — no user-visible gain.
+  were written by a Windows gzip writer: `OS=0x00` (FAT filesystem
+  byte), `XFL=0x04` (`gzip --fast`), and a populated wall-clock
+  `MTIME`. This pipeline writes `OS=0x03` (Unix), `XFL=0x00`,
+  `MTIME=0` (verifiable with
+  `head -c 10 out.tar.gz | od -An -tx1`). Reproducing the old
+  header byte-for-byte would need a custom gzip writer — no
+  user-visible gain.
 - **Per-file mtimes from the maintainer's local checkout.** The
   historical tarballs preserve filesystem mtimes spanning
   2021–2024 per file. This pipeline stamps every member with a
